@@ -1,5 +1,7 @@
 import dlt
 
+from dlt_framework.core.contracts import define_source
+from dlt_framework.core.models import ResourcePolicy, SourceContext
 
 execution_order = []
 
@@ -19,6 +21,18 @@ def inventory():
 
 
 @dlt.source(name="original_name_is_ignored")
-def source():
+def source(context: SourceContext):
     execution_order.clear()
-    return [products, inventory]
+    resources = {"products": products, "inventory": inventory}
+    if context.selected_resource is not None:
+        return resources[context.selected_resource]
+    return list(resources.values())
+
+
+SOURCE = define_source(
+    factory=source,
+    resources={
+        "products": ResourcePolicy(empty="fail"),
+        "inventory": ResourcePolicy(empty="fail"),
+    },
+)

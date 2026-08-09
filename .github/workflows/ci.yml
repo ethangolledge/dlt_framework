@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: dlt
+          POSTGRES_PASSWORD: dlt
+          POSTGRES_DB: pipelines
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dlt -d pipelines"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.3"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen --group dev
+      - run: uv run ruff check dlt_framework tests
+      - run: uv run ruff format --check dlt_framework tests
+      - run: uv run mypy dlt_framework
+      - run: uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
+        env:
+          TEST_POSTGRES_URL: postgresql://dlt:dlt@localhost:5432/pipelines
+      - run: docker build --tag dlt-framework:test .

@@ -1,224 +1,128 @@
 ---
 name: build-dlt-source
-description: Add or update a credential-driven extraction source in this dlt pipeline framework. Use when onboarding a REST API, Chess.com, Shopify GraphQL, PostgreSQL, MySQL, Microsoft SQL Server, or MongoDB source; declaring its source and destination environment variables; choosing resources/tables and append-or-replace behavior; or creating files below pipeline/sources/. Also use when asked to implement a new client pipeline without transformations or changes to framework core.
+description: Add, update, or validate a production client extraction source in this dlt framework without changing framework core. Use when onboarding a REST API, GraphQL API, SQL database, MongoDB collection, or another credential-driven source; selecting endpoints, tables, or resources; defining append/replace/merge behavior, primary keys, empty-response policy, incrementals, pagination, or backfill bounds; declaring source and DuckDB/Postgres destination configuration; or creating files below dlt_framework/sources/.
 ---
 
-# Build a DLT Source
+# Build a dlt source
 
-Implement client pipelines by declaring source credentials, declaring destination credentials, and adding one focused file below `pipeline/sources/`. Treat `README.md` as the detailed source of truth and this skill as the execution checklist.
+Build one production source for one isolated client deployment. Optimize for unattended recovery
+and fast future maintenance, not for speculative connector reuse.
 
-## Required input
+## Read the canonical guidance
 
-Establish these values from the request or existing project context:
+Read the relevant repository documents before editing:
 
-1. Source filename, using a valid Python identifier such as `orders_api`.
-2. Source kind: `rest`, `shopify`, `sql`, or `mongodb`.
-3. Source connection values and credential names.
-4. Destination kind and credentials. The built-in targets are `postgres` and `duckdb`.
-5. Resources, endpoints, SQL tables, or MongoDB collections to load.
-6. `append` or `replace` for every resource, including a justified default where appropriate.
+1. Always read `docs/source-authoring.md` for the source contract, write behavior, bounded-query
+   rules, and required tests.
+2. Read `docs/configuration.md` when adding environment variables, destination credentials,
+   pipeline identity, worker settings, or retry controls.
+3. Read `docs/operations.md` for backfills, restart behavior, retry/recovery, persistent state, or
+   deployment changes.
+4. Read `docs/architecture.md` before proposing framework-core changes, new destinations, state
+   stores, schedulers, locks, or notification behavior.
+5. Inspect the closest source module and its tests. Use `dlt_framework/sources/rest/dummyjson.py`
+   for the basic contract and `tests/fixtures/sources/rest/backfillable.py` for bounded extraction.
 
-Ask only for values that cannot be inferred safely. Do not require live secret values to write or test source code; placeholders and environment-variable names are sufficient. If resource selection or write disposition is missing, call that out because it changes pipeline behavior.
+Treat those files as the source of truth. Do not copy their connector examples or configuration
+tables into this skill.
 
-## Guardrails
+## Establish the extraction contract
 
-- Keep extraction code in exactly one new or edited `pipeline/sources/{kind}/{source_name}.py` file unless tests also need updating.
-- Do not change `pipeline/core/` or `pipeline/execution/` for a supported connector.
-- Do not transform source records. Load the raw records exposed by the source.
-- Do not hardcode, print, log, or commit credentials. Use `dlt.config.value` for non-secret configuration and `dlt.secrets.value` for secrets.
-- Do not expose values from `.env` in output. Edit `.env` only when the user asks to configure the local environment; otherwise return a placeholder credential block.
-- Make `source()` callable with no arguments and return exactly one `DltSource`.
-- Make every path component and filename a valid Python identifier. Do not add `__init__.py`; this repository uses namespace packages.
-- Declare `append` or `replace` in the source file. Never move write disposition into deployment configuration.
-- Keep source resources sequential and let native `dlt` connectors handle authentication, pagination, incrementals, and type conversion.
-- Add a dependency to `pyproject.toml` only for a genuinely new connector or destination. MongoDB additionally requires the one-time verified-source installation described in `README.md`.
+Resolve these facts from the request, upstream documentation, and repository before coding:
 
-## Credential contract
+- source selector and source protocol;
+- credential and non-secret configuration variable names, never live secret values;
+- resources/endpoints/tables/collections to load;
+- pagination or database batching behavior and its termination condition;
+- incremental cursor, ordering, initial value, overlap, and late-arriving-record behavior;
+- `append`, `replace`, or `merge`, including stable primary keys for merge;
+- `allow`, `warn`, or `fail` when a resource extracts zero records;
+- whether upstream accepts explicit inclusive-lower/exclusive-upper bounds;
+- certified destination (`duckdb` or `postgres`) and destination credential variable name.
 
-The filename becomes the pipeline name, destination schema, and custom source configuration namespace. For `pipeline/sources/rest/orders_api.py`, use:
+Discover repository facts before asking. Ask the user only when missing semantics would change data
+correctness. Never guess a primary key, write disposition, empty-snapshot behavior, or cursor.
 
-```dotenv
-# Source configuration: declare only arguments used by source()
-SOURCES__ORDERS_API__BASE_URL=https://api.example.com/
-SOURCES__ORDERS_API__API_KEY=replace-me
+## Implement the smallest source
 
-# Destination configuration: choose one block
-DESTINATION=postgres
-DESTINATION__POSTGRES__CREDENTIALS=postgresql://loader:password@host:5432/database
-```
+1. Add or edit one `dlt_framework/sources/{kind}/{source_name}.py` module.
+2. Prefer a maintained native dlt connector. Add a custom request loop only when the connector
+   cannot express the upstream protocol.
+3. Accept `SourceContext`; when `context.selected_resource` is set, construct only that resource so
+   unselected endpoints or reflected tables do no work.
+4. Keep authentication, pagination, incrementals, type conversion, write disposition, and primary
+   keys in native dlt resource configuration.
+5. Export `SOURCE = define_source(...)` and declare one `ResourcePolicy` per resource. Keep the
+   contract and actual resource names identical.
+6. Use `dlt.secrets.value` for credentials and `dlt.config.value` for non-secret source settings.
+7. Keep records raw. Do not add business transformations, orchestration, alerts, or destination
+   adapters to a source module.
+8. Do not add `__init__.py`; this repository uses namespace packages.
 
-or:
+For a supported source pattern, do not edit `dlt_framework/core/` or
+`dlt_framework/execution/`. If a real source exposes a missing framework capability, stop and
+describe the concrete gap and failure mode before expanding core.
 
-```dotenv
-DESTINATION=duckdb
-DESTINATION__DUCKDB__CREDENTIALS=/data/pipelines.duckdb
-```
+## Apply reliability rules
 
-Apply these naming rules:
+- Use `merge` with a stable source key for mutable entities and every backfillable resource.
+- Use `replace` only for complete snapshots; explicitly decide whether an empty result may clear
+  the target.
+- Use `append` only for immutable events with a tested cursor/offset and overlap policy.
+- For backfills, bind bounds through `rest_incremental_config`, `incremental_for`, or
+  `range_kwargs`; declare `backfill=True`; and keep the range half-open.
+- Prove both bounds reach the actual outbound request, SQL predicate, or connector arguments.
+  Merely calling a bound helper is insufficient.
+- Protect custom pagination against repeated/non-advancing cursors, malformed payloads, and absent
+  termination fields.
+- Distinguish retryable 429/5xx/timeouts from authentication, validation, schema, and other terminal
+  failures. Do not build an independent unbounded retry loop inside a source.
+- Add a connector helper or dependency only for this real source and only with failure-focused
+  tests. Do not create empty connector folders or generic abstractions in anticipation of clients.
 
-- Convert the source filename to uppercase for `SOURCES__<SOURCE>__...`.
-- Use the decorated custom source's filename namespace for REST, Chess.com, and Shopify.
-- Use `SOURCES__SQL_DATABASE__...` for `sql_database()` credentials, regardless of wrapper filename.
-- Use `SOURCES__MONGODB__...` for the verified `mongodb()` connector.
-- URL-encode reserved characters inside connection URIs.
-- Encode lists passed through the environment with Python-literal syntax, for example `["orders", "customers"]`.
+## Validate before handoff
 
-Before coding, present or internally establish a compact contract like:
+Add tests proportional to the source:
 
-```text
-Source: rest/orders_api
-Source credentials: SOURCES__ORDERS_API__API_KEY
-Source config: SOURCES__ORDERS_API__BASE_URL
-Destination: postgres
-Destination credentials: DESTINATION__POSTGRES__CREDENTIALS
-Resources: orders=append, customers=replace
-```
+- contract/discovery and selected-resource construction;
+- exact pagination/cursor behavior and termination;
+- empty `allow`, `warn`, or `fail` behavior as declared;
+- transient and terminal upstream failures;
+- exact half-open bounds and idempotent overlap when bounded;
+- additive schema change acceptance and incompatible type rejection when the source has a stable
+  schema fixture;
+- DuckDB integration, plus Postgres integration when destination-specific behavior is involved.
 
-Never repeat actual secret values in the final handoff.
-
-## Implementation workflow
-
-1. Read the relevant connector section and environment-variable table in `README.md`.
-2. Inspect nearby source files and `pyproject.toml`; preserve unrelated user changes.
-3. Normalize the requested source name and choose its directory.
-4. Define optional `source()` arguments with `dlt.config.value` or `dlt.secrets.value` so callers pass no arguments.
-5. Create native dlt resources using the closest template below.
-6. Assign an explicit write disposition to every resource.
-7. Verify discovery with the filename selector; qualify it as `{kind}/{source_name}` only if another folder contains the same filename.
-8. Run the full test suite. Run a live extraction only when credentials and network access are available and the user authorizes the external read/write.
-9. Hand off the source path, selector, credential variable names, resource-to-table mapping, dispositions, and validation result.
-
-## Connector patterns
-
-Adapt the smallest matching pattern. Prefer the native connector over custom request loops.
-
-### REST API
-
-```python
-import dlt
-from dlt.sources.rest_api import RESTAPIConfig, rest_api_resources
-
-
-@dlt.source
-def source(
-    base_url: str = dlt.config.value,
-    api_key: str = dlt.secrets.value,
-):
-    config: RESTAPIConfig = {
-        "client": {
-            "base_url": base_url,
-            "auth": {"type": "bearer", "token": api_key},
-        },
-        "resource_defaults": {"write_disposition": "append"},
-        "resources": [
-            "orders",
-            {
-                "name": "customers",
-                "write_disposition": "replace",
-                "endpoint": {"path": "customers"},
-            },
-        ],
-    }
-    return rest_api_resources(config)
-```
-
-Express pagination, selectors, endpoint parameters, and incrementals through `RESTAPIConfig`. For snapshot endpoints, prefer `replace`; for immutable event/history feeds, prefer `append`. Confirm semantics rather than guessing when duplicates would matter.
-
-### Chess.com PubAPI
-
-Use the REST connector with `https://api.chess.com/pub/`, `username: str = dlt.config.value`, and `user_agent: str = dlt.config.value`. Supply the identifying user agent as a header. The API is public, so do not invent an API-key variable. Use the complete example in `README.md` and generally replace current player, stats, games, and club snapshots.
-
-### Shopify GraphQL
-
-```python
-import dlt
-from pipeline.core.graphql import graphql_connection_resource
-
-
-@dlt.source
-def source(
-    shop_url: str = dlt.config.value,
-    api_version: str = dlt.config.value,
-    access_token: str = dlt.secrets.value,
-):
-    endpoint = f"{shop_url.rstrip('/')}/admin/api/{api_version}/graphql.json"
-    headers = {"X-Shopify-Access-Token": access_token}
-    return [
-        graphql_connection_resource(
-            name="products",
-            endpoint=endpoint,
-            headers=headers,
-            write_disposition="replace",
-            query="""
-            query Products($cursor: String) {
-              products(first: 250, after: $cursor) {
-                nodes { id title status createdAt updatedAt }
-                pageInfo { hasNextPage endCursor }
-              }
-            }
-            """,
-        ),
-    ]
-```
-
-Use one `graphql_connection_resource` per top-level Shopify connection. Keep `nodes` and `pageInfo { hasNextPage endCursor }` in every query. Confirm the app has the read scopes and any older-orders permission required by the selected resources.
-
-### SQL database
-
-```python
-from dlt.sources.sql_database import sql_database
-
-from pipeline.core.resources import set_write_dispositions
-
-
-def source():
-    return set_write_dispositions(
-        sql_database(),
-        default="replace",
-        overrides={"events": "append"},
-    )
-```
-
-Use the same wrapper for PostgreSQL, MySQL, and Microsoft SQL Server. Configure `SOURCES__SQL_DATABASE__CREDENTIALS`, with optional `SCHEMA` and `TABLE_NAMES`; the URI driver identifies the engine. Ensure every override names a reflected resource or `set_write_dispositions` will reject it.
-
-### MongoDB
-
-```python
-from mongodb import mongodb
-
-from pipeline.core.resources import set_write_dispositions
-
-
-def source():
-    return set_write_dispositions(mongodb(), default="append")
-```
-
-Configure `SOURCES__MONGODB__CONNECTION_URL`, with optional `DATABASE` and `COLLECTION_NAMES`. Before using this wrapper, confirm the verified source generated by `dlt init mongodb duckdb` exists. Do not reimplement its type conversion.
-
-## Validation
-
-Run:
+Run the repository gates:
 
 ```bash
-pytest
+uv run dlt-framework validate KIND/NAME [--resource RESOURCE]
+uv run ruff check dlt_framework tests
+uv run ruff format --check dlt_framework tests
+uv run mypy dlt_framework
+uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
 ```
 
-Also verify the new module imports and discovery accepts its selector without making an external API or database call where possible. A successful implementation satisfies all of these conditions:
+Run a live source read or destination write only when credentials exist and the user authorizes it.
+Do not claim end-to-end success when only mocks or local fixtures ran.
 
-- `source()` binds with zero required arguments.
-- Instantiation returns a `DltSource` when placeholder/test configuration permits it.
-- The source filename matches the expected pipeline and schema name.
-- Each resource name matches its destination table and has an explicit disposition.
-- Only the intended source, tests, and explicitly necessary dependency/configuration files changed.
+## Update operator-facing configuration
 
-Do not claim end-to-end success when a live source or destination was unavailable. Distinguish unit/discovery validation from an actual load.
+- Add redacted variable names and safe placeholders to `.env.example` when the source introduces
+  configuration.
+- Require stable `PIPELINE_NAME` and `DATASET_NAME` in production examples.
+- Keep a DuckDB filename different from `DATASET_NAME`.
+- Keep credentials out of `.dlt/config.toml`, logs, tests, commits, and the final response.
+- Update canonical docs only when framework behavior changes; source-specific facts belong beside
+  the source or in its tests, not in generic framework documentation.
 
 ## Handoff
 
-Report only what the operator needs:
+Report:
 
-- source file and run selector;
-- required source and destination environment-variable names, with redacted placeholders;
-- resource/table names and their dispositions;
-- tests run and whether a live load occurred;
-- any new dependency, Shopify permission, or MongoDB initialization prerequisite.
+- source path and CLI selector;
+- resource-to-table mapping, write disposition, primary key, empty policy, and backfill support;
+- required source and destination variable names with redacted placeholders;
+- quality commands and contract/integration tests run;
+- whether a live extraction/load occurred;
+- any unresolved upstream permission, rate-limit, historical-access, or recovery constraint.

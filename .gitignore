@@ -3,8 +3,10 @@
 __pycache__/
 *.py[cod]
 *.duckdb
-.dlt/
+.dlt/*
+!.dlt/config.toml
 build/
 dist/
 *.egg-info/
 .pytest_cache/
+test_data/*

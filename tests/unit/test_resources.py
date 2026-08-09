@@ -1,7 +1,7 @@
 import dlt
 import pytest
 
-from pipeline.core.resources import set_write_dispositions
+from dlt_framework.core.resources import set_write_dispositions
 
 
 def example_source():

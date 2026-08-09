@@ -4,25 +4,57 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dlt-pipeline-framework"
-version = "0.1.0"
-description = "A small, reusable framework for configurable dlt pipelines"
+version = "0.2.0"
+description = "A production-oriented dlt extraction foundation for isolated client deployments"
 requires-python = ">=3.10,<3.15"
 dependencies = [
-    "dlt[duckdb,postgres,sql_database]~=1.29.0",
-    "pymongo>=4.10,<5",
-    "pymssql>=2.3,<3",
-    "pymysql>=1.1,<2",
+    "dlt[duckdb,postgres]~=1.29.0",
+    "tenacity>=9.0,<10",
 ]
+
+[project.scripts]
+dlt-framework = "dlt_framework.execution.run_pipeline:entrypoint"
 
 [dependency-groups]
 dev = [
-    "pytest",
+    "mypy>=1.15,<2",
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.11,<1",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["pipeline*"]
+include = ["dlt_framework*"]
 namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-markers"
+markers = ["postgres: requires the TEST_POSTGRES_URL integration service"]
+filterwarnings = [
+    "ignore:datetime.datetime.utcnow.*:DeprecationWarning:dlt.*",
+    "ignore:This process.*multi-threaded.*:DeprecationWarning:multiprocessing.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+explicit_package_bases = true
+exclude = ["tests/fixtures"]
+
+[[tool.mypy.overrides]]
+module = ["dlt.*", "duckdb.*"]
+ignore_missing_imports = true

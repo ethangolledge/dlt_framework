@@ -1,0 +1,21 @@
+# Non-secret defaults. Credentials belong in environment variables or ignored
+# .dlt/secrets.toml.
+[runtime]
+log_level = "INFO"
+log_format = "JSON"
+
+[extract]
+workers = 5
+
+[normalize]
+workers = 3
+
+[load]
+workers = 5
+raise_on_failed_jobs = true
+delete_completed_jobs = true
+truncate_staging_dataset = true
+start_new_jobs_on_signal = true
+
+[pipelines]
+restore_from_destination = true
