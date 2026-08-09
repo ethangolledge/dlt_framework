@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build DLT Source"
+  short_description: "Add credential-driven DLT source pipelines"
+  default_prompt: "Use $build-dlt-source to add a credential-driven source to this DLT framework."
