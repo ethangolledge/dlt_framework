@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dlt-pipeline-framework"
+version = "0.1.0"
+description = "A small, reusable framework for configurable dlt pipelines"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    "dlt[duckdb,postgres,sql_database]~=1.29.0",
+    "pymongo>=4.10,<5",
+    "pymssql>=2.3,<3",
+    "pymysql>=1.1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pipeline*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
