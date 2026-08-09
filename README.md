@@ -33,6 +33,35 @@ Passing the host UID/GID keeps bind-mounted DuckDB and pipeline-state files writ
 running the container as root. If an older container created those files under another UID, repair
 them once with `sudo chown -R "$(id -u):$(id -g)" test_data dlt_state`.
 
+dlt stores committed incremental state in the destination's `_dlt_pipeline_state` table. The
+local `DLT_DATA_DIR` is its working directory and also contains schemas, traces, and load packages
+that may not have reached the destination yet. Choose either deployment mode deliberately:
+
+```bash
+# Recommended: preserve the working directory and any interrupted load package.
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  --env DLT_DATA_DIR=/var/lib/dlt \
+  --mount type=bind,source="$(pwd)/test_data",target=/data \
+  --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
+  dlt-pipelines run dummyjson
+
+# Stateless runner: restore committed state from DuckDB and discard local artifacts on exit.
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  --env DLT_DATA_DIR=/tmp/dlt \
+  --env PIPELINES__RESTORE_FROM_DESTINATION=true \
+  --mount type=bind,source="$(pwd)/test_data",target=/data \
+  dlt-pipelines run dummyjson
+```
+
+`DLT_DATA_DIR` selects the in-container working path; the Docker mount decides whether it is
+persistent. Keep `PIPELINES__RESTORE_FROM_DESTINATION=true` for stateless runners. A stateless
+runner can recover committed incremental state, but cannot recover an extracted or normalized
+package that was interrupted before reaching the destination.
+
 `DESTINATION__DUCKDB__CREDENTIALS=/data/client.duckdb` writes one DuckDB database file. The
 configured `DATASET_NAME` is a schema inside that database. Keep the file stem and dataset name
 different because DuckDB otherwise sees an ambiguous catalog/schema reference.

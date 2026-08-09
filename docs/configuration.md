@@ -14,6 +14,8 @@
 | `MAX_BACKFILL_CHUNKS` | No | `10000` | Pre-extraction safety limit. |
 | `LOG_FORMAT` | No | `text` | Use `json` in production. |
 | `LOG_LEVEL` | No | `INFO` | Framework log level. |
+| `DLT_DATA_DIR` | No | Image: `/var/lib/dlt` | Local dlt working directory. |
+| `PIPELINES__RESTORE_FROM_DESTINATION` | No | `true` | Restore committed state and schemas from the target. |
 
 Destination credentials use native dlt variables:
 
@@ -38,6 +40,12 @@ The committed `.dlt/config.toml` is non-secret and establishes worker and failur
 - `truncate_staging_dataset=true`: cleans staging data after merge/replace.
 - `start_new_jobs_on_signal=true`: lets an in-flight load drain after shutdown begins.
 - `[pipelines].restore_from_destination=true`: restores committed state on a clean runner.
+
+The destination and local directory serve different purposes. dlt writes committed pipeline state
+to `_dlt_pipeline_state` in the destination. `DLT_DATA_DIR` contains the local working copy plus
+schemas, traces, extracted files, and pending load packages. Mount that directory for full local
+recovery, or point it at ephemeral storage and rely on destination restoration for successfully
+committed state.
 
 Tune workers against source rate limits, destination connection limits, memory, and record size;
 more workers are not automatically faster or safer.

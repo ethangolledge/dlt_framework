@@ -3,7 +3,8 @@
 ## Deployment checklist
 
 - Use stable `PIPELINE_NAME`, `DATASET_NAME`, destination, and credentials across restarts.
-- Mount `/var/lib/dlt` on persistent storage.
+- Choose a local-state mode: mount `DLT_DATA_DIR` for pending-package recovery, or use ephemeral
+  storage with destination restoration enabled.
 - For local bind mounts, run with the host UID/GID and ensure both destination and state paths are
   writable; filesystem permission failures are terminal and must not be retried.
 - Prevent overlapping jobs for the same pipeline identity in the scheduler.
@@ -25,6 +26,18 @@ failed pipeline step; they do not justify unbounded API pressure.
 
 At startup the runner synchronizes destination state and processes local pending packages before
 extracting new data. Never delete the persistent dlt directory as a first response to failure.
+
+Committed source/incremental state is stored in the destination's `_dlt_pipeline_state` table.
+Local `DLT_DATA_DIR` storage additionally preserves work that has not been committed yet:
+
+- **Persistent local state (recommended):** mount the configured directory. Restarts can continue
+  pending extract/normalize/load work and retain local traces.
+- **Destination-restored state:** use an ephemeral writable directory and keep
+  `PIPELINES__RESTORE_FROM_DESTINATION=true`. A clean runner restores committed state and schemas,
+  but interrupted uncommitted packages are discarded and must be extracted again.
+
+Do not set `PIPELINES__RESTORE_FROM_DESTINATION=false` on an ephemeral runner. For incremental
+sources, that can make a clean container behave like a first run.
 
 For backfills, the destination checkpoint contains only the active/latest plan and next bound. If
 the process dies:
