@@ -84,6 +84,25 @@ def _validate_duckdb_identity(
             f"DuckDB file/catalog {catalog!r} cannot equal DATASET_NAME {dataset_name!r}; "
             "use distinct names to avoid ambiguous catalog/schema references"
         )
+    _validate_duckdb_access(Path(path))
+
+
+def _validate_duckdb_access(database: Path) -> None:
+    """Fail before dlt retries a local filesystem permission problem."""
+    target = database if database.exists() else database.parent
+    if not target.exists():
+        raise ConfigurationError(
+            f"DuckDB parent directory {database.parent} does not exist; create and mount it "
+            "before running the pipeline"
+        )
+    if os.access(target, os.W_OK):
+        return
+    raise ConfigurationError(
+        f"DuckDB {'file' if database.exists() else 'directory'} {target} is not writable by "
+        f"the current process (uid={os.geteuid()}); fix its ownership or permissions. For a "
+        'Docker bind mount, run with --user "$(id -u):$(id -g)" and mount a host-owned '
+        "pipeline-state directory at /var/lib/dlt"
+    )
 
 
 def _positive_int(values: Mapping[str, str], name: str, default: int) -> int:

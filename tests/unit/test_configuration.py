@@ -60,6 +60,22 @@ def test_rejects_duckdb_catalog_dataset_collision() -> None:
         )
 
 
+def test_rejects_unwritable_duckdb_bind_mount(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "client.duckdb"
+    database.touch()
+    monkeypatch.setattr("dlt_framework.core.configuration.os.access", lambda *_: False)
+
+    with pytest.raises(ConfigurationError, match=r"not writable.*Docker bind mount"):
+        load_pipeline_config(
+            source_definition(),
+            {
+                "DESTINATION": "duckdb",
+                "DATASET_NAME": "raw_client",
+                "DESTINATION__DUCKDB__CREDENTIALS": str(database),
+            },
+        )
+
+
 def test_validates_retry_configuration() -> None:
     with pytest.raises(ConfigurationError, match="cannot exceed"):
         load_pipeline_config(

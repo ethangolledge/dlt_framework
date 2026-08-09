@@ -198,6 +198,9 @@ class JsonFormatter(logging.Formatter):
             "chunks_total",
             "operation",
             "error_type",
+            "attempt",
+            "attempts",
+            "retry_in_seconds",
         ):
             if hasattr(record, name):
                 payload[name] = getattr(record, name)

@@ -231,7 +231,7 @@ def test_run_validates_backfill_load_policy(
         runtime.run(config(definition, resource="events", backfill=plan))
 
 
-def test_transient_operation_is_retried_and_classified() -> None:
+def test_transient_operation_is_retried_and_classified(caplog) -> None:
     attempts = 0
     definition = SourceDefinition(PurePosixPath("rest/source.py"), "source", lambda context: None)
 
@@ -253,6 +253,31 @@ def test_transient_operation_is_retried_and_classified() -> None:
             fail,
         )
     assert attempts == 2
+    assert "ConnectionError: offline; retrying in" in caplog.text
+
+
+def test_permission_failure_is_not_retried() -> None:
+    definition = SourceDefinition(PurePosixPath("rest/source.py"), "source", lambda context: None)
+    attempts = 0
+
+    def fail():
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionError('Cannot open file "/data/client.duckdb": Permission denied')
+
+    with pytest.raises(TerminalRunError, match="1 attempt"):
+        runtime._call_with_retry(
+            PipelineConfig(
+                pipeline_name="source",
+                dataset_name="raw_source",
+                destination="duckdb",
+                source=definition,
+                retry=RetryConfig(attempts=3, minimum_wait=0, maximum_wait=0),
+            ),
+            "sync",
+            fail,
+        )
+    assert attempts == 1
 
 
 def test_pending_packages_are_drained_before_extraction(monkeypatch) -> None:

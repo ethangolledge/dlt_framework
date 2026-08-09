@@ -8,7 +8,13 @@ from dlt.common.pipeline import ExtractInfo
 from dlt.extract.source import DltSource
 from dlt.pipeline.helpers import retry_load
 from dlt.pipeline.pipeline import Pipeline
-from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from dlt_framework.core.backfill import BackfillWindow, parse_bound
 from dlt_framework.core.discovery import instantiate_source
@@ -305,7 +311,31 @@ def _call_with_retry(
     operation: str,
     call: Callable[[], _T],
 ) -> _T:
-    retry_predicate = retry_load(("sync", "extract", "load", "run"))
+    dlt_retryable = retry_load(("sync", "extract", "load", "run"))
+
+    def retryable(error: BaseException) -> bool:
+        return bool(dlt_retryable(error)) and not _is_local_permission_error(error)
+
+    def log_before_retry(state: RetryCallState) -> None:
+        error = state.outcome.exception() if state.outcome is not None else None
+        delay = state.next_action.sleep if state.next_action is not None else 0.0
+        LOGGER.warning(
+            "%s failed on attempt %s/%s: %s; retrying in %.1f seconds",
+            operation,
+            state.attempt_number,
+            config.retry.attempts,
+            _concise_error(error),
+            delay,
+            extra={
+                "event": "retry",
+                "operation": operation,
+                "attempt": state.attempt_number,
+                "attempts": config.retry.attempts,
+                "retry_in_seconds": round(delay, 3),
+                "error_type": type(error).__name__ if error is not None else "unknown",
+            },
+        )
+
     attempt_number = 0
     try:
         for attempt in Retrying(
@@ -315,19 +345,12 @@ def _call_with_retry(
                 max=max(config.retry.maximum_wait, 0.001),
                 jitter=min(1.0, config.retry.maximum_wait),
             ),
-            retry=retry_if_exception(retry_predicate),
+            retry=retry_if_exception(retryable),
+            before_sleep=log_before_retry,
             reraise=True,
         ):
             attempt_number = attempt.retry_state.attempt_number
             with attempt:
-                if attempt_number > 1:
-                    LOGGER.warning(
-                        "Retrying %s (attempt %s/%s)",
-                        operation,
-                        attempt_number,
-                        config.retry.attempts,
-                        extra={"event": "retry", "operation": operation},
-                    )
                 return call()
     except FrameworkError:
         raise
@@ -335,10 +358,32 @@ def _call_with_retry(
         raise
     except BaseException as error:
         message = f"{operation} failed after {attempt_number or 1} attempt(s): {error}"
-        if retry_predicate(error) and attempt_number >= config.retry.attempts:
+        if retryable(error) and attempt_number >= config.retry.attempts:
             raise TransientRunError(message) from error
         raise TerminalRunError(message) from error
     raise RuntimeError("Retry loop finished without returning or raising")
+
+
+def _is_local_permission_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, PermissionError):
+            return True
+        message = str(current).casefold()
+        if "permission denied" in message or "read-only file system" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _concise_error(error: BaseException | None) -> str:
+    if error is None:
+        return "unknown error"
+    lines = [line.strip() for line in str(error).splitlines() if line.strip()]
+    detail = lines[-1] if lines else repr(error)
+    return f"{type(error).__name__}: {detail}"
 
 
 def _display_bound(value: datetime) -> str:

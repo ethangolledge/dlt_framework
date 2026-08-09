@@ -22,11 +22,16 @@ Build and run DuckDB in Docker:
 docker build -t dlt-pipelines .
 mkdir -p test_data dlt_state
 docker run --rm --stop-timeout 300 \
+  --user "$(id -u):$(id -g)" \
   --env-file .env \
   --mount type=bind,source="$(pwd)/test_data",target=/data \
   --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
   dlt-pipelines run rest/dummyjson --resource products
 ```
+
+Passing the host UID/GID keeps bind-mounted DuckDB and pipeline-state files writable without
+running the container as root. If an older container created those files under another UID, repair
+them once with `sudo chown -R "$(id -u):$(id -g)" test_data dlt_state`.
 
 `DESTINATION__DUCKDB__CREDENTIALS=/data/client.duckdb` writes one DuckDB database file. The
 configured `DATASET_NAME` is a schema inside that database. Keep the file stem and dataset name

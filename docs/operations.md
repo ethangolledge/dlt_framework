@@ -4,6 +4,8 @@
 
 - Use stable `PIPELINE_NAME`, `DATASET_NAME`, destination, and credentials across restarts.
 - Mount `/var/lib/dlt` on persistent storage.
+- For local bind mounts, run with the host UID/GID and ensure both destination and state paths are
+  writable; filesystem permission failures are terminal and must not be retried.
 - Prevent overlapping jobs for the same pipeline identity in the scheduler.
 - Deliver `SIGTERM`, configure at least 300 seconds grace, and set a whole-job timeout.
 - Alert on exit codes 2–4 and on a missing expected success event.
