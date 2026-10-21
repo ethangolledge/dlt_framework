@@ -7,8 +7,7 @@
 .dlt/*
 !.dlt/config.toml
 .pytest_cache
-.agents
-.codex
+.claude
 **/__pycache__
 **/*.py[cod]
 **/*.duckdb

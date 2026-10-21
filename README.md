@@ -1,192 +1,127 @@
 # dlt framework
 
-An opinionated extraction foundation that is cloned and adapted for each client. It moves raw
-source data into DuckDB or Postgres and deliberately leaves scheduling, transformations, and
-alert delivery outside the repository.
+A small library for building named, independently runnable [dlt](https://dlthub.com/docs) pipelines
+into DuckDB or Postgres. You declare *what* to load; the framework owns how it runs, how it
+backfills, and the guards that stop a pipeline silently reloading its whole source.
 
-The reliability contract is idempotent at-least-once delivery: transient work may be replayed,
-and backfillable resources must make that replay safe with `merge` and a stable primary key.
+## Layout
 
-## Quick start
-
-```bash
-cp .env.example .env
-uv sync --group dev
-uv run dlt-framework validate rest/dummyjson
-uv run dlt-framework run rest/dummyjson --resource products
+```
+dlt_framework/
+  core/                 shared by every source type; never imports a source package
+  sources/
+    rest/               RestApiSource       + pipelines/ defined on it
+    sql/                SqlSource           (SQL Server, Postgres, ...)
+    filesystem/         FilesystemSource    (S3, GCS, Azure, local)
+    custom/             CustomSource        (any Python generator)
+  cli.py                one entry point for every pipeline
 ```
 
-Build and run DuckDB in Docker:
+Each source type owns its package: its adapter, anything specific to it, and the pipelines built on
+it (`sources/<type>/pipelines/<system>.py`). `lint-imports` enforces that core never imports a
+source type and that source types never import each other.
 
-```bash
-docker build -t dlt-pipelines .
-mkdir -p test_data dlt_state
-docker run --rm --stop-timeout 300 \
-  --user "$(id -u):$(id -g)" \
-  --env-file .env \
-  --mount type=bind,source="$(pwd)/test_data",target=/data \
-  --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
-  dlt-pipelines run rest/dummyjson --resource products
+## Components
+
+Everything that decides what data lands is a required argument.
+
+| Component | Variants |
+| --- | --- |
+| `Pipeline(name, source, target, schema_contract)` | Unique, permanent name = dlt state key |
+| `Target(destination, dataset)` | Credentials from dlt env vars / `.dlt/secrets.toml` |
+| `Resource(name, write, cursor, empty, backfill=None)` | One stream of rows into one table |
+| Write mode | `Append()`, `Replace()`, `Merge(primary_key=..., strategy=...)` |
+| Cursor | `TimeCursor(path, start, format, on_missing)`, `ValueCursor(path, start, on_missing)`, or `None` |
+| Time format | `IsoTimestamp`, `Strftime`, `UnixSeconds`, `UnixMillis`, `DateOnly`, `AwareDatetime`, `NaiveDatetime` |
+| Backfill | `TimeBackfill(start, every)`, `ValueBackfill(start, every)`, `RowBackfill(size)` |
+
+```python
+from datetime import datetime, timezone
+
+from dlt_framework.core import (
+    FREEZE_DATA_TYPES, Duration, IsoTimestamp, Merge, Pipeline, Resource, Target, TimeBackfill,
+    TimeCursor,
+)
+from dlt_framework.sources.rest import RestApiSource
+
+orders = Resource(
+    name="orders",
+    write=Merge(primary_key=("id",), strategy="delete-insert"),
+    cursor=TimeCursor(
+        path="updated_at",
+        start=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        format=IsoTimestamp(),
+        on_missing="raise",
+        fallbacks=("created_at",),
+    ),
+    empty="warn",
+    backfill=TimeBackfill(start=datetime(2022, 1, 1, tzinfo=timezone.utc), every=Duration(1, "months")),
+)
+
+Pipeline(
+    name="acme_shop",
+    target=Target("postgres", dataset="raw_shop"),
+    schema_contract=FREEZE_DATA_TYPES,
+    source=RestApiSource(
+        name="shop",
+        client={"base_url": "https://api.example.com/", "paginator": {"type": "header_link"}},
+        resources={
+            orders: {"path": "orders", "start_param": "updated_since", "end_param": "updated_before"},
+        },
+    ),
+)
 ```
-
-Passing the host UID/GID keeps bind-mounted DuckDB and pipeline-state files writable without
-running the container as root. If an older container created those files under another UID, repair
-them once with `sudo chown -R "$(id -u):$(id -g)" test_data dlt_state`.
-
-dlt stores committed incremental state in the destination's `_dlt_pipeline_state` table. The
-local `DLT_DATA_DIR` is its working directory and also contains schemas, traces, and load packages
-that may not have reached the destination yet. Choose either deployment mode deliberately:
-
-```bash
-# Recommended: preserve the working directory and any interrupted load package.
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env-file .env \
-  --env DLT_DATA_DIR=/var/lib/dlt \
-  --mount type=bind,source="$(pwd)/test_data",target=/data \
-  --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
-  dlt-pipelines run dummyjson
-
-# Stateless runner: restore committed state from DuckDB and discard local artifacts on exit.
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env-file .env \
-  --env DLT_DATA_DIR=/tmp/dlt \
-  --env PIPELINES__RESTORE_FROM_DESTINATION=true \
-  --mount type=bind,source="$(pwd)/test_data",target=/data \
-  dlt-pipelines run dummyjson
-```
-
-`DLT_DATA_DIR` selects the in-container working path; the Docker mount decides whether it is
-persistent. Keep `PIPELINES__RESTORE_FROM_DESTINATION=true` for stateless runners. A stateless
-runner can recover committed incremental state, but cannot recover an extracted or normalized
-package that was interrupted before reaching the destination.
-
-`DESTINATION__DUCKDB__CREDENTIALS=/data/client.duckdb` writes one DuckDB database file. The
-configured `DATASET_NAME` is a schema inside that database. Keep the file stem and dataset name
-different because DuckDB otherwise sees an ambiguous catalog/schema reference.
 
 ## Commands
 
 ```text
-dlt-framework run SOURCE [--resource NAME]
-dlt-framework backfill SOURCE --resource NAME --from ISO --to ISO --chunksize ISO [--restart]
-dlt-framework list SOURCE
-dlt-framework validate SOURCE [--resource NAME]
+dlt-framework list                                     pipelines, source types, resources
+dlt-framework check NAME                               build run + backfill sources offline
+dlt-framework run NAME [--allow-initial-load]
+dlt-framework backfill NAME [--resource R --from RESUME]
 ```
 
-- `run` loads the full source or one resource.
-- `backfill` processes sequential half-open `[from, to)` windows and checkpoints after each
-  successful chunk.
-- `list` shows resource write modes, keys, empty policies, and backfill support.
-- `validate` checks configuration and source contracts without extracting records.
+- **run** loads every resource from its stored cursor under pipeline name `NAME`. If a cursor
+  resource has no stored state but its table already holds rows (renamed pipeline/source/resource,
+  wrong dataset or destination), it refuses to start instead of reloading from the cursor start.
+- **backfill** loads each resource's declared history under `NAME__backfill`, into the same
+  tables, with its own staging dataset. Time and value backfills run from their `start` up to the
+  cursor's `start`, bounded with `end_value`, so they never read or move the run cursor. Row
+  backfills page through sources with no usable cursor until a page comes back short. Nothing is
+  checkpointed: resume with `--resource R --from <end of last logged window>`.
 
-The old command form (`dlt-framework SOURCE ...`) remains available for one compatibility
-release and emits a deprecation warning.
+Exit codes: `0` success, `2` definition/config/guard refusal, `3` terminal failure, `4` transient
+retries exhausted, `130` interrupted.
 
-## Source contract
-
-Each file under `dlt_framework/sources/` exports one explicit `SOURCE` contract. Resource
-selection reaches the factory before endpoint construction or database reflection.
-
-```python
-import dlt
-from dlt.sources.rest_api import RESTAPIConfig, rest_api_resources
-
-from dlt_framework.core.contracts import define_source
-from dlt_framework.core.models import ResourcePolicy, SourceContext
-
-
-@dlt.source
-def source(context: SourceContext):
-    names = ("orders", "customers")
-    selected = names if context.selected_resource is None else (context.selected_resource,)
-    config: RESTAPIConfig = {
-        "client": {"base_url": "https://api.example.com/"},
-        "resources": [
-            {
-                "name": name,
-                "write_disposition": "replace",
-                "endpoint": {"path": name},
-            }
-            for name in selected
-        ],
-    }
-    return rest_api_resources(config)
-
-
-SOURCE = define_source(
-    factory=source,
-    resources={
-        "orders": ResourcePolicy(empty="fail"),
-        "customers": ResourcePolicy(empty="allow"),
-    },
-)
-```
-
-Write disposition, primary key, pagination, authentication, and cursor behavior stay in native
-dlt resources. `ResourcePolicy` contains only framework behavior that dlt cannot infer:
-
-- `empty="fail"` aborts before normalization/loading and protects snapshots from accidental
-  truncation.
-- `empty="warn"` loads but emits a structured warning.
-- `empty="allow"` treats an empty extraction as expected.
-- `backfill=True` declares bounded extraction support.
-
-See [Source authoring](docs/source-authoring.md) for the complete implementation checklist.
-
-## Backfills
-
-Chunk sizes use one positive ISO-8601 unit:
-
-```text
-PT30S  PT30M  PT6H  P1D  P1W  P1M  P1Y
-```
-
-Months and years are calendar-aware and anchored to the original start. Dates mean midnight UTC;
-datetimes require `Z` or an explicit offset. The upper bound is exclusive.
+## Running
 
 ```bash
-uv run dlt-framework backfill rest/orders \
-  --resource events \
-  --from 2026-01-01 \
-  --to 2026-02-01 \
-  --chunksize P1D
+cp .env.example .env
+uv sync --group dev
+uv run dlt-framework run dummyjson
 ```
 
-The checkpoint is stored in dlt pipeline state at the destination. An interrupted run resumes the
-same plan. A conflicting unfinished plan is rejected; `--restart` clears its checkpoint and safely
-replays from the start. Plans above `MAX_BACKFILL_CHUNKS` (10,000 by default) are rejected before
-extraction.
+```bash
+docker build -t dlt-pipelines .
+docker run --rm --user "$(id -u):$(id -g)" --env-file .env \
+  --mount type=bind,source="$(pwd)/test_data",target=/data \
+  --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
+  dlt-pipelines run dummyjson
+```
 
-## Production contract
-
-The job runner must provide the controls that cannot be made process-local:
-
-- one active job per `PIPELINE_NAME`;
-- persistent `/var/lib/dlt` storage;
-- `SIGTERM` delivery and at least 300 seconds of shutdown grace;
-- a whole-job timeout;
-- alerting on nonzero exits and missing scheduled successes.
-
-Exit codes are `0` success, `2` configuration/source contract, `3` terminal pipeline/data failure,
-`4` transient retry exhaustion, and `130` interruption. Production logs use JSON and include the
-operation, resource, chunk, and causal exception without credential values.
-
-Read [Operations](docs/operations.md), [Configuration](docs/configuration.md), and the
-[architecture decision](docs/architecture.md) before deploying a client pipeline.
+The scheduler must guarantee one active job per pipeline name across hosts (the built-in lock
+covers one host), deliver `SIGTERM` with a grace period, and alert on non-zero exits. Keep
+`DLT_DATA_DIR` persistent, or keep `PIPELINES__RESTORE_FROM_DESTINATION=true` on ephemeral runners.
 
 ## Development
 
-This repository uses namespace packages and intentionally has no `__init__.py` files.
-
 ```bash
-uv sync --group dev
 uv run ruff check dlt_framework tests
 uv run ruff format --check dlt_framework tests
+uv run lint-imports
 uv run mypy dlt_framework
-uv run pytest --cov=dlt_framework --cov-branch
+uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
 ```
 
-Only DuckDB and Postgres destinations are certified. Add a connector or destination dependency
-only alongside a real client source and its integration/recovery tests.
+Guidance for building and changing pipelines, including how dlt state works underneath, is in
+`.claude/skills/dlt-pipelines/`.

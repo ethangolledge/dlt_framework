@@ -1,26 +1,46 @@
-class FrameworkError(Exception):
-    """Base error for invalid framework configuration or source definitions."""
+"""Framework exceptions. Each class carries the process exit code the CLI returns for it."""
+
+import re
+
+_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-class ConfigurationError(FrameworkError):
-    """Raised when required runtime configuration is missing or invalid."""
+class RunError(Exception):
+    exit_code = 1
 
 
-class SourceDefinitionError(FrameworkError):
-    """Raised when a source selector or source module violates the contract."""
+class DefinitionError(RunError):
+    """A pipeline, source, table, or cursor definition is invalid."""
+
+    exit_code = 2
 
 
-class BackfillError(FrameworkError):
-    """Raised when a requested backfill is invalid or unsupported."""
+class ConfigurationError(RunError):
+    """Runtime configuration or command-line input is invalid."""
+
+    exit_code = 2
 
 
-class DataContractError(FrameworkError):
-    """Raised when extracted data violates a declared resource policy."""
+class GuardError(RunError):
+    """A safety guard refused to run; an operator must decide what happens next."""
+
+    exit_code = 2
 
 
-class TerminalRunError(Exception):
-    """A pipeline failure that requires configuration, code, or data intervention."""
+class TerminalRunError(RunError):
+    """A pipeline step failed in a way that retrying cannot fix."""
+
+    exit_code = 3
 
 
-class TransientRunError(Exception):
-    """A retryable failure that remained after the configured attempts."""
+class TransientRunError(RunError):
+    """A pipeline step still failed after every retry attempt."""
+
+    exit_code = 4
+
+
+def require_identifier(value: str, kind: str) -> str:
+    """Names become dlt state keys and table names, so they must be stable snake_case."""
+    if not _IDENTIFIER.fullmatch(value):
+        raise DefinitionError(f"{kind} {value!r} must be snake_case and start with a letter")
+    return value

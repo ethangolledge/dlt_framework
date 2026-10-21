@@ -33,6 +33,7 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run ruff check dlt_framework tests
       - run: uv run ruff format --check dlt_framework tests
+      - run: uv run lint-imports
       - run: uv run mypy dlt_framework
       - run: uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
         env:

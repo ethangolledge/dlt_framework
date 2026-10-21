@@ -8,15 +8,16 @@ version = "0.2.0"
 description = "A production-oriented dlt extraction foundation for isolated client deployments"
 requires-python = ">=3.10,<3.15"
 dependencies = [
-    "dlt[duckdb,postgres]~=1.29.0",
+    "dlt[duckdb,postgres,sql_database,filesystem,s3,parquet]~=1.29.0",
     "tenacity>=9.0,<10",
 ]
 
 [project.scripts]
-dlt-framework = "dlt_framework.execution.run_pipeline:entrypoint"
+dlt-framework = "dlt_framework.cli:entrypoint"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.15",
     "mypy>=1.15,<2",
     "pytest>=8,<10",
     "pytest-cov>=6,<8",
@@ -58,3 +59,21 @@ exclude = ["tests/fixtures"]
 [[tool.mypy.overrides]]
 module = ["dlt.*", "duckdb.*"]
 ignore_missing_imports = true
+
+[tool.importlinter]
+root_package = "dlt_framework"
+
+[[tool.importlinter.contracts]]
+name = "cli -> sources -> core; core never imports a source type"
+type = "layers"
+layers = ["dlt_framework.cli", "dlt_framework.sources", "dlt_framework.core"]
+
+[[tool.importlinter.contracts]]
+name = "source types are independent; shared code belongs in core"
+type = "independence"
+modules = [
+    "dlt_framework.sources.custom",
+    "dlt_framework.sources.filesystem",
+    "dlt_framework.sources.rest",
+    "dlt_framework.sources.sql",
+]

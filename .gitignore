@@ -10,3 +10,5 @@ dist/
 *.egg-info/
 .pytest_cache/
 test_data/*
+.coverage
+dlt_state/

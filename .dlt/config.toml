@@ -19,3 +19,7 @@ start_new_jobs_on_signal = true
 
 [pipelines]
 restore_from_destination = true
+
+[destination]
+# Replace loads into staging, then swaps inside one transaction: no empty-table window.
+replace_strategy = "insert-from-staging"
