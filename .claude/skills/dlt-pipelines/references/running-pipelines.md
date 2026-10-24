@@ -33,11 +33,10 @@ resource `orders` through the SQL config key `table`.
 
 Rules:
 
-- A pipeline is a group of resources that always run together. Never run part of a pipeline, and
-  never run the same pipeline name in two processes at once. `PipelineLock` stops it on one host;
-  across hosts the scheduler must. To extract resources concurrently, either set
-  `Source(parallel=True)` (dlt threads inside one process) or define separate pipelines with
-  separate names.
+- A pipeline is a group of resources on one schedule. `--resource` runs a subset (state is per
+  resource). Never run the same pipeline name in two processes at once: `PipelineLock` stops it on
+  one host; across hosts the scheduler must. Resources already extract in parallel threads; for
+  separate processes, define separate pipelines with separate names (each table has one owner).
 - Treat renaming any name in the table as a **migration**, not a refactor. It needs a written plan
   for the stored cursor (keep the old name, or re-seed through a backfill and
   `--allow-initial-load`) and user sign-off.
@@ -52,15 +51,15 @@ only in class attributes and the `units` / `check` hooks:
 
 | | `IncrementalRun` | `BackfillRun` |
 | --- | --- | --- |
-| Command | `pipeline run NAME [--allow-initial-load]` | `pipeline backfill NAME [--resource R --from RESUME]` |
+| Command | `pipeline run NAME [--resource R ...] [--allow-initial-load]` | `pipeline backfill NAME [--resource R ...] [--from X] [--to Y] [--missing]` |
 | dlt pipeline name | `NAME` | `NAME__backfill` |
 | Dataset / tables | `Target.dataset` | same dataset, same tables |
-| Units | one: all resources, window `None` (resume from stored cursor) | one per resource with a declared `backfill`, over its windows |
+| Units | one: the selected resources, window `None` (resume from stored cursor) | one per selected resource with a declared `backfill`, over its windows (narrowed by `--from/--to`, or the gaps for `--missing`) |
 | Incremental state | read and advanced | untouched: time/value windows set `end_value` (mock state); row windows apply no cursor |
-| Resume after interruption | automatic (dlt state) | stateless: `--resource R --from <end of last logged window>` |
-| Staging dataset | `<dataset>_staging` | `<dataset>_backfill_staging` |
+| Resume after interruption | automatic (dlt state; a kept package loads first) | stateless: `pipeline backfill NAME --missing` (coverage from the `loads` frame) |
+| Staging dataset | `<dataset>_staging_run_<pipeline>` | `<dataset>_staging_backfill_<pipeline>` |
 | Empty policy | enforced | not enforced (an empty chunk is normal; a short row page ends the unit) |
-| `check` hook | lost-state guard (G3) | none |
+| `check` hook | future-cursor guard (G8), lost-state guard (G3) | none |
 
 Never load history through `run`: no lowering a cursor `start`, no `refresh=`, no `dev_mode`, no
 `dlt pipeline drop`. History always goes through `backfill`.
@@ -71,9 +70,11 @@ Never load history through `run`: no lowering a cursor `start`, no `refresh=`, n
 | --- | --- | --- | --- |
 | Reliable timestamp | `TimeCursor(path, start, format, on_missing)` | `TimeBackfill(start, every)` | Pick the `format` the source uses; each source package handles the bounds. |
 | Timestamp that can be null | `TimeCursor(..., fallbacks=(...))` | `TimeBackfill` | REST/custom only. SQL needs the coalesce done upstream (view or computed column). |
-| Monotonic number: id, sequence, SQL Server `rowversion` (as an integer) | `ValueCursor(path, start, on_missing)` | `ValueBackfill(start, every)` | |
+| Monotonic number: id, sequence | `ValueCursor(path, start, format=Integer(), on_missing)` | `ValueBackfill(start, every)` | |
+| SQL Server `rowversion` | `ValueCursor(path, start, format=RowVersion(), on_missing)` | `ValueBackfill(start, every)` | `start`, `every`, `--from/--to` are the integers the rowversion encodes (`CAST(rv AS BIGINT)`); they reach SQL as `binary(8)`. |
 | Nothing usable | `None` (every run loads everything; use `Replace`) | `RowBackfill(size)` | SQL needs `order_by`; REST needs `offset_param`/`limit_param`. |
 | CDC / a stream the source tracks itself | `None` | none | The source type owns its position. |
+| A scraped, newest-first listing | `TimeCursor` / `ValueCursor` with `row_order="desc"` | the spider maps `self.window` to pages or date filters | dlt stops the crawl at the first item below the cursor (closed range: the item *at* the cursor is re-read). |
 
 A source type lists the window kinds it can push upstream (`Source.windows`). Declaring a backfill
 it cannot push fails at definition time.
@@ -88,8 +89,8 @@ Write mode is always your stated choice. Replaying a backfill chunk is idempoten
    need. The backfill ends at `T` by construction, half-open, so `T` is loaded exactly once.
 3. Run `pipeline run NAME`. The first run loads `[T, now)` and stores the cursor.
 4. Run `pipeline backfill NAME`. Steps 3 and 4 are independent and may overlap.
-5. Verify with `dlt pipeline -v NAME info` that `last_value` advanced. Check the per-window row
-   counts in the backfill logs.
+5. Verify with `pipeline status NAME`: the cursor advanced, and backfill coverage reaches 100%
+   with 0 gaps. `pipeline backfill NAME --missing` loads whatever is missing.
 
 ## 5. Full-load guards
 
@@ -102,6 +103,8 @@ Write mode is always your stated choice. Replaying a backfill chunk is idempoten
 | G5 Pre-flight | Unknown `start_value` after a change | `pipeline check NAME`, then compare `cursor_start` (`resources` frame) with `cursor_last_value` (`loads` frame, joined on `run_id`, `resource_id`) (or `dlt pipeline -v NAME info`) |
 | G6 History only via backfill | History loaded through `run` | §2 |
 | G7 Ordered stop only on ordered data | `row_order` skipping rows | Set `row_order` only when upstream ordering is documented and tested |
+| G8 Future-cursor guard | One future-dated row stopping a time cursor until that date | `Run._check_cursors` after extract and in `IncrementalRun.check`; tolerance in `[guards]` |
+| G9 State never ahead of data | A terminal failure after extract leaving the local cursor past rows that never landed | `Run._kept_or_discarded`: discards local state (`pipeline.drop()`) unless the failure is transient or an interrupt (`dlt-internals.md` §6) |
 
 When a requested change touches any name in §1, a cursor field, `start`, `format`, `row_order`,
 `lag`, `on_missing`, the destination, or `restore_from_destination`, state the effect on the next

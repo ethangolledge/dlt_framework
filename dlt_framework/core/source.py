@@ -21,8 +21,9 @@ class Source(ABC, Generic[ConfigT]):
     """A named group of resources, each with source-type specific extraction config.
 
     ``name`` is the dlt source and schema name and part of every resource's state key: it must
-    never change once a pipeline has loaded. ``parallel`` extracts resources in dlt worker threads
-    inside one process, which is safe for one pipeline name.
+    never change once a pipeline has loaded. Resources are always extracted in parallel threads;
+    ``[sources.<name>.extract] workers`` in config sets how many (``1`` serialises a rate-limited
+    upstream).
 
     A source type implements ``resource`` and lists the ``windows`` it can push upstream. It can
     extend ``validate`` for its own definition rules. Write hints, cursor preparation, and
@@ -33,7 +34,6 @@ class Source(ABC, Generic[ConfigT]):
 
     name: str
     resources: Mapping[Resource, ConfigT]
-    parallel: bool = False
 
     def __post_init__(self) -> None:
         require_identifier(self.name, "Source name")
@@ -44,6 +44,14 @@ class Source(ABC, Generic[ConfigT]):
     def resource(self, resource: Resource, config: ConfigT, window: Window | None) -> DltResource:
         """The dlt resource named ``resource.name``, with its cursor or window pushed into the
         upstream request so only the needed rows are fetched."""
+
+    def requires(self) -> dict[str, str]:
+        """Modules extraction needs beyond the core, mapped to the extra that installs them.
+
+        Libraries the source package imports itself need no entry: without them it never loads.
+        Declare what dlt imports only at run time, such as a SQL backend or a bucket protocol.
+        """
+        return {}
 
     def state_key(self, resource: Resource) -> str:
         """The dlt resource whose state holds this resource's cursor."""
@@ -59,7 +67,7 @@ class Source(ABC, Generic[ConfigT]):
     def build(self, resources: Iterable[Resource], window: Window | None) -> DltSource:
         prepared = [self._prepared(resource, window) for resource in resources]
         source = dlt.source(name=self.name)(lambda: prepared)()
-        return source.parallelize() if self.parallel else source
+        return source.parallelize()
 
     def _prepared(self, resource: Resource, window: Window | None) -> DltResource:
         dlt_resource = self.resource(resource, self.resources[resource], window)

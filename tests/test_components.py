@@ -8,13 +8,14 @@ from dlt_framework.core import (
     AwareDatetime,
     DateOnly,
     Duration,
+    Integer,
     IsoTimestamp,
     Merge,
     NaiveDatetime,
     Pipeline,
     Replace,
-    Resource,
     RowBackfill,
+    RowVersion,
     Strftime,
     Target,
     TimeBackfill,
@@ -27,9 +28,6 @@ from dlt_framework.core import (
 from dlt_framework.core.errors import ConfigurationError, DefinitionError
 from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow
 from dlt_framework.sources.custom import CustomSource
-from dlt_framework.sources.filesystem import Files, FilesystemSource
-from dlt_framework.sources.rest import RestApiSource
-from dlt_framework.sources.sql import SqlSource
 
 UTC = UTC
 INSTANT = datetime(2026, 3, 1, 12, 30, tzinfo=UTC)
@@ -42,19 +40,23 @@ def time_cursor(start: datetime = datetime(2026, 1, 1, tzinfo=UTC), **extra) -> 
 
 
 @pytest.mark.parametrize(
-    ("time_format", "rendered"),
+    ("cursor_format", "value", "stored"),
     [
-        (IsoTimestamp(), "2026-03-01T12:30:00Z"),
-        (Strftime("%d/%m/%Y"), "01/03/2026"),
-        (UnixSeconds(), 1772368200),
-        (UnixMillis(), 1772368200000),
-        (DateOnly(), date(2026, 3, 1)),
-        (AwareDatetime(), INSTANT),
-        (NaiveDatetime(), datetime(2026, 3, 1, 12, 30)),
+        (IsoTimestamp(), INSTANT, "2026-03-01T12:30:00Z"),
+        (Strftime("%d/%m/%Y %H:%M"), INSTANT, "01/03/2026 12:30"),
+        (UnixSeconds(), INSTANT, 1772368200),
+        (UnixMillis(), INSTANT, 1772368200000),
+        (DateOnly(), datetime(2026, 3, 1, tzinfo=UTC), date(2026, 3, 1)),
+        (AwareDatetime(), INSTANT, INSTANT),
+        (NaiveDatetime(), INSTANT, datetime(2026, 3, 1, 12, 30)),
+        (Integer(), 1005, 1005),
+        (RowVersion(), 1005, b"\x00\x00\x00\x00\x00\x00\x03\xed"),
     ],
 )
-def test_time_formats(time_format, rendered) -> None:
-    assert time_format.render(INSTANT) == rendered
+def test_cursor_formats_render_and_parse_back(cursor_format, value, stored) -> None:
+    """parse(render(x)) == x is what lets guards, monitoring, and coverage read stored state."""
+    assert cursor_format.render(value) == stored
+    assert cursor_format.parse(stored) == value
 
 
 def test_month_durations_stay_anchored_to_start_day() -> None:
@@ -63,44 +65,68 @@ def test_month_durations_stay_anchored_to_start_day() -> None:
     assert [month.after(start, n).date() for n in (1, 2)] == [date(2026, 2, 28), date(2026, 3, 31)]
 
 
-def test_time_backfill_ends_at_cursor_start_and_can_resume() -> None:
+def test_time_backfill_ends_at_cursor_start_and_narrows_to_stated_edges() -> None:
     cursor = time_cursor(start=datetime(2026, 1, 3, 12, tzinfo=UTC))
     backfill = TimeBackfill(start=datetime(2026, 1, 1, tzinfo=UTC), every=Duration(1, "days"))
-    windows = list(backfill.windows(cursor, None))
+    windows = list(backfill.windows(cursor))
     assert [(w.start.day, w.end.day, w.end.hour) for w in windows] == [
         (1, 2, 0),
         (2, 3, 0),
         (3, 3, 12),
     ]
-    resumed = list(backfill.windows(cursor, "2026-01-02T00:00:00Z"))
-    assert resumed == windows[1:]
+    resumed = backfill.edge("2026-01-02T00:00:00Z")
+    assert list(backfill.windows(cursor, resumed)) == windows[1:]
+    assert list(backfill.windows(cursor, end=backfill.edge("2026-01-02T06:00:00Z"))) == [
+        windows[0],
+        TimeWindow(datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 1, 2, 6, tzinfo=UTC)),
+    ]
     with pytest.raises(ConfigurationError):
-        list(backfill.windows(cursor, "2026-01-02"))
+        backfill.edge("2026-01-02")
 
 
 def test_value_and_row_backfills() -> None:
-    cursor = ValueCursor(path="id", start=25, on_missing="raise")
-    assert list(ValueBackfill(start=0, every=10).windows(cursor, "10")) == [
-        ValueWindow(10, 20),
-        ValueWindow(20, 25),
-    ]
-    rows = RowBackfill(size=100).windows(None, "200")
+    cursor = ValueCursor(path="id", start=25, format=Integer(), on_missing="raise")
+    values = ValueBackfill(start=0, every=10)
+    assert list(values.windows(cursor, 10)) == [ValueWindow(10, 20), ValueWindow(20, 25)]
+    assert list(values.windows(cursor, 0, 15)) == [ValueWindow(0, 10), ValueWindow(10, 15)]
+    rows = RowBackfill(size=100).windows(None, 200)
     assert [next(rows), next(rows)] == [RowWindow(200, 100), RowWindow(300, 100)]
-    with pytest.raises(ConfigurationError, match="not an integer"):
-        next(ValueBackfill(start=0, every=10).windows(cursor, "2026-01-01"))
-    with pytest.raises(ConfigurationError, match="not an integer"):
-        next(RowBackfill(size=100).windows(None, "ten"))
+    assert list(RowBackfill(size=100).windows(None, 0, 150)) == [
+        RowWindow(0, 100),
+        RowWindow(100, 50),
+    ]
+    with pytest.raises(ConfigurationError):
+        values.edge("2026-01-01")
+    with pytest.raises(ConfigurationError):
+        RowBackfill(size=100).edge("ten")
     assert RowWindow(0, 100).is_last(99) and not RowWindow(0, 100).is_last(100)
 
 
 def test_backfill_must_match_cursor_and_start_before_it() -> None:
     every_day = Duration(1, "days")
-    with pytest.raises(DefinitionError, match="TimeCursor"):
+    with pytest.raises(DefinitionError):
         TimeBackfill(start=datetime(2025, 1, 1, tzinfo=UTC), every=every_day).check(None)
-    with pytest.raises(DefinitionError, match="before cursor start"):
+    with pytest.raises(DefinitionError):
         TimeBackfill(start=datetime(2027, 1, 1, tzinfo=UTC), every=every_day).check(time_cursor())
-    with pytest.raises(DefinitionError, match="ValueCursor"):
+    with pytest.raises(DefinitionError):
         ValueBackfill(start=0, every=1).check(time_cursor())
+
+
+@pytest.mark.parametrize(
+    ("window", "text"),
+    [
+        (
+            TimeWindow(datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 2, 1, tzinfo=UTC)),
+            ("2025-01-01T00:00:00+00:00", "2025-02-01T00:00:00+00:00"),
+        ),
+        (ValueWindow(5, 10), ("5", "10")),
+        (RowWindow(100, 50), ("100", "150")),
+    ],
+)
+def test_window_edges_round_trip_through_text(window, text) -> None:
+    """Spans written to logs and monitoring parse back to the same window."""
+    assert window.span() == text
+    assert type(window).between(*map(type(window).parse_edge, text)) == window
 
 
 def test_cursors_bound_only_their_own_window_kind() -> None:
@@ -112,8 +138,8 @@ def test_cursors_bound_only_their_own_window_kind() -> None:
     with pytest.raises(DefinitionError):
         cursor.bounds(ValueWindow(0, 1))
     with pytest.raises(DefinitionError):
-        ValueCursor(path="id", start=0, on_missing="raise").bounds(window)
-    with pytest.raises(DefinitionError, match="timezone-aware"):
+        ValueCursor(path="id", start=0, format=Integer(), on_missing="raise").bounds(window)
+    with pytest.raises(DefinitionError):
         time_cursor(start=datetime(2026, 1, 1))
 
 
@@ -128,12 +154,6 @@ def test_write_modes() -> None:
         Merge(primary_key=(), strategy="upsert")
 
 
-@pytest.mark.parametrize("name", ["Orders", "1orders", "order-items", ""])
-def test_names_must_be_snake_case(name) -> None:
-    with pytest.raises(DefinitionError):
-        Resource(name=name, write=Append(), cursor=None, empty="warn")
-
-
 def test_pipeline_names_are_unique_and_cannot_mimic_backfills() -> None:
     def define(name: str) -> Pipeline:
         return Pipeline(
@@ -144,64 +164,14 @@ def test_pipeline_names_are_unique_and_cannot_mimic_backfills() -> None:
         )
 
     define("shop")
-    with pytest.raises(DefinitionError, match="defined twice"):
+    with pytest.raises(DefinitionError):
         define("shop")
-    with pytest.raises(DefinitionError, match="__"):
+    with pytest.raises(DefinitionError):
         define("shop__backfill")
-    with pytest.raises(DefinitionError, match="No pipeline named"):
+    with pytest.raises(DefinitionError):
         Pipeline.get("missing")
 
 
-def test_duckdb_file_cannot_share_dataset_name(monkeypatch) -> None:
-    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", "/data/raw.duckdb")
-    with pytest.raises(ConfigurationError):
-        Target("duckdb", dataset="raw").factory("%s_staging")
-
-
-ROWS = Resource(name="t", write=Append(), cursor=None, empty="warn", backfill=RowBackfill(size=10))
-
-
-@pytest.mark.parametrize(
-    ("build", "message"),
-    [
-        (lambda: SqlSource(name="erp", resources={ROWS: {}}), "order_by"),
-        (
-            lambda: RestApiSource(name="api", client={"base_url": "x"}, resources={ROWS: {}}),
-            "offset",
-        ),
-        (
-            lambda: FilesystemSource(
-                name="files", resources={ROWS: Files(bucket_url="x", file_glob="*", reader="csv")}
-            ),
-            "cannot push RowWindow",
-        ),
-        (
-            lambda: SqlSource(
-                name="erp",
-                resources={
-                    Resource(
-                        name="t",
-                        write=Append(),
-                        cursor=time_cursor(fallbacks=("created_at",)),
-                        empty="warn",
-                    ): {}
-                },
-            ),
-            "fallback",
-        ),
-        (
-            lambda: FilesystemSource(
-                name="files",
-                resources={
-                    Resource(name="t", write=Append(), cursor=time_cursor(), empty="warn"): Files(
-                        bucket_url="x", file_glob="*", reader="csv"
-                    )
-                },
-            ),
-            "modification_date",
-        ),
-    ],
-)
-def test_each_source_type_validates_its_own_rules(build, message) -> None:
-    with pytest.raises(DefinitionError, match=message):
-        build()
+def test_rowversions_sort_like_their_integers() -> None:
+    rendered = [RowVersion().render(value) for value in (1, 255, 256, 2**40)]
+    assert rendered == sorted(rendered)

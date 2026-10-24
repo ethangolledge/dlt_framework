@@ -62,11 +62,12 @@ Read only what the task needs, but always read the file for the area you are cha
    - credential variable names (never values).
 2. **Declare it** in `dlt_framework/sources/<type>/pipelines/<system>.py`: one
    `Pipeline(name, target, schema_contract, source)` with `Resource` definitions on the existing
-   source type (`RestApiSource`, `SqlSource`, `FilesystemSource`, or `CustomSource`). Add a new
+   source type (`RestApiSource`, `SqlSource`, `FilesystemSource`, `CustomSource`, or `ScrapeSource`). Add a new
    source type only for a reusable protocol, as its own package.
-3. **Group resources deliberately.** Resources in one pipeline always run together. Use
-   `parallel=True` for concurrency inside one process. Use a separate pipeline for resources that
-   must run on a different schedule or in another process.
+3. **Group resources deliberately.** A pipeline's resources extract in parallel threads (dlt
+   `[extract] workers`; `[sources.<name>.extract] workers = 1` serialises one upstream), and
+   `run --resource` loads a subset. Use a separate pipeline for resources that must run on a
+   different schedule or in another process.
 4. **Test.** Add or extend a binding test that captures the outbound request or SQL and asserts
    the cursor start, plus each backfill window's bounds (G2). Behaviour changes need DuckDB
    integration tests.

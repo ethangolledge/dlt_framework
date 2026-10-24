@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
-      - run: uv sync --frozen --group dev
+      - run: uv sync --frozen --group dev --all-extras
       - run: uv run ruff check dlt_framework tests .claude/skills/dlt-pipelines/scripts
       - run: uv run ruff format --check dlt_framework tests .claude/skills/dlt-pipelines/scripts
       - run: uv run lint-imports
@@ -41,4 +41,4 @@ jobs:
       - run: uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
         env:
           TEST_POSTGRES_URL: postgresql://dlt:dlt@localhost:5432/pipelines
-      - run: docker build --tag dlt-framework:test .
+      - run: docker build --build-arg EXTRAS="--extra duckdb --extra scrape" --tag dlt-framework:test .

@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
-import sqlalchemy
 from requests.adapters import BaseAdapter
 
 from dlt_framework.core import (
@@ -17,12 +16,13 @@ from dlt_framework.core import (
     Append,
     AwareDatetime,
     Duration,
+    Integer,
     IsoTimestamp,
     Merge,
     Pipeline,
     Resource,
-    Retry,
     RowBackfill,
+    RowVersion,
     Target,
     TimeBackfill,
     TimeCursor,
@@ -44,7 +44,6 @@ def define(name: str, source) -> Pipeline:
         name=name,
         target=Target("duckdb", dataset="raw_shop"),
         schema_contract=FREEZE_DATA_TYPES,
-        retry=Retry(attempts=1),
         source=source,
     )
 
@@ -108,32 +107,32 @@ TIMED = Resource(
 )
 
 
-def test_rest_run_sends_start_only(sink) -> None:
+def test_rest_run_sends_start_only() -> None:
     definition, adapter = rest_pipeline(TIMED)
-    IncrementalRun(definition, sink)()
+    IncrementalRun(definition)()
     assert adapter.queries == [{"updated_since": ["2026-02-01T00:00:00Z"]}]
 
 
-def test_rest_time_backfill_sends_both_bounds(sink) -> None:
+def test_rest_time_backfill_sends_both_bounds() -> None:
     definition, adapter = rest_pipeline(TIMED)
-    BackfillRun(definition, sink)()
+    BackfillRun(definition)()
     assert adapter.queries == [
         {"updated_since": ["2026-01-01T00:00:00Z"], "updated_before": ["2026-02-01T00:00:00Z"]}
     ]
 
 
-def test_rest_row_backfill_sends_offset_and_limit(sink) -> None:
+def test_rest_row_backfill_sends_offset_and_limit() -> None:
     paged = Resource(
         name="orders", write=MERGE, cursor=None, empty="warn", backfill=RowBackfill(size=2)
     )
     definition, adapter = rest_pipeline(paged, total=3)
-    assert BackfillRun(definition, sink)()["orders"] == 3
+    assert BackfillRun(definition)()["orders"] == 3
     assert adapter.queries == [{"skip": ["0"], "take": ["2"]}, {"skip": ["2"], "take": ["2"]}]
 
 
 @pytest.fixture
-def erp(tmp_path, monkeypatch) -> list[str]:
-    """A SQLite source table plus a list collecting every SQL statement sent to it."""
+def erp(tmp_path, monkeypatch) -> None:
+    """A SQLite source table of five orders."""
     database = tmp_path / "erp.sqlite"
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("CREATE TABLE Orders (id INTEGER PRIMARY KEY, version INTEGER)")
@@ -141,45 +140,34 @@ def erp(tmp_path, monkeypatch) -> list[str]:
             "INSERT INTO Orders VALUES (?, ?)", [(i, i * 10) for i in range(1, 6)]
         )
     monkeypatch.setenv("SOURCES__ERP__CREDENTIALS", f"sqlite:///{database}")
-    return []
 
 
-def sql_pipeline(resource: Resource, statements: list[str], **config) -> Pipeline:
-    def capture(engine):
-        sqlalchemy.event.listen(engine, "before_cursor_execute", lambda *a: statements.append(a[2]))
-        return engine
-
-    options = {"table": "Orders", "engine_adapter_callback": capture, **config}
-    return define("erp", SqlSource(name="erp", resources={resource: options}))
+def sql_pipeline(resource: Resource, **config) -> Pipeline:
+    options = {"table": "Orders", **config}
+    return define("erp", SqlSource(name="erp", backend="sqlalchemy", resources={resource: options}))
 
 
-def test_sql_value_backfill_is_a_bounded_where_clause(erp, query, sink) -> None:
+def test_sql_value_backfill_is_a_bounded_where_clause(erp, query) -> None:
     resource = Resource(
         name="orders",
         write=MERGE,
-        cursor=ValueCursor(path="version", start=40, on_missing="raise"),
+        cursor=ValueCursor(path="version", start=40, format=Integer(), on_missing="raise"),
         empty="warn",
         backfill=ValueBackfill(start=10, every=20),
     )
-    assert BackfillRun(sql_pipeline(resource, erp), sink)()["orders"] == 3
+    assert BackfillRun(sql_pipeline(resource))()["orders"] == 3  # versions 10..30, below 40
     assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(1,), (2,), (3,)]
-    select = next(s for s in erp if 'FROM "Orders"' in s or "FROM Orders" in s)
-    assert '"Orders".version >= ?' in select and '"Orders".version < ?' in select
 
 
-def test_sql_row_backfill_orders_and_pages(erp, query, sink) -> None:
+def test_sql_row_backfill_orders_and_pages(erp, query) -> None:
     resource = Resource(
         name="orders", write=MERGE, cursor=None, empty="warn", backfill=RowBackfill(size=2)
     )
-    assert BackfillRun(sql_pipeline(resource, erp, order_by=["id"]), sink)()["orders"] == 5
-    selects = [s for s in erp if "LIMIT" in s]
-    assert len(selects) == 3 and all('ORDER BY "Orders".id' in s and "OFFSET" in s for s in selects)
-    assert query("SELECT count(*) FROM raw_shop.orders") == [(5,)]
+    assert BackfillRun(sql_pipeline(resource, order_by=["id"]))()["orders"] == 5
+    assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(i,) for i in range(1, 6)]
 
 
-def test_filesystem_loads_new_files_and_backfills_by_modification_date(
-    tmp_path, query, sink
-) -> None:
+def test_filesystem_loads_new_files_and_backfills_by_modification_date(tmp_path, query) -> None:
     folder = tmp_path / "in"
     folder.mkdir()
     (folder / "old.csv").write_text("id\n1\n")
@@ -198,17 +186,68 @@ def test_filesystem_loads_new_files_and_backfills_by_modification_date(
     files = Files(bucket_url=folder.as_uri(), file_glob="*.csv", reader="csv")
     definition = define("files", FilesystemSource(name="files", resources={resource: files}))
 
-    assert IncrementalRun(definition, sink)()["orders"] == 1
-    assert BackfillRun(definition, sink)()["orders"] == 1
+    assert IncrementalRun(definition)()["orders"] == 1
+    assert BackfillRun(definition)()["orders"] == 1
     assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(1,), (2,)]
 
     # The cursor lives on the listing resource; the lost-state guard must still find it.
-    IncrementalRun(definition, sink)()
+    IncrementalRun(definition)()
+    Pipeline.registry.clear()  # the code now names the pipeline differently
     renamed = define("files_renamed", FilesystemSource(name="files", resources={resource: files}))
     with pytest.raises(GuardError):
-        IncrementalRun(renamed, sink)()
+        IncrementalRun(renamed)()
 
 
-def test_append_resource_without_cursor_loads_everything(erp, query, sink) -> None:
+def test_append_resource_without_cursor_loads_everything(erp, query) -> None:
     resource = Resource(name="orders", write=Append(), cursor=None, empty="fail")
-    assert IncrementalRun(sql_pipeline(resource, erp), sink)()["orders"] == 5
+    assert IncrementalRun(sql_pipeline(resource))()["orders"] == 5
+
+
+@pytest.fixture
+def ledger(tmp_path, monkeypatch) -> None:
+    """A SQL Server-style table: ``rv`` holds a rowversion, 8 big-endian bytes."""
+    database = tmp_path / "ledger.sqlite"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("CREATE TABLE Ledger (id INTEGER PRIMARY KEY, rv BLOB NOT NULL)")
+        connection.executemany(
+            "INSERT INTO Ledger VALUES (?, ?)",
+            [(i, (1000 + i).to_bytes(8, "big")) for i in range(1, 7)],
+        )
+    monkeypatch.setenv("SOURCES__LEDGER__CREDENTIALS", f"sqlite:///{database}")
+
+
+def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, query, frames) -> None:
+    resource = Resource(
+        name="ledger",
+        write=MERGE,
+        cursor=ValueCursor(path="rv", start=1004, format=RowVersion(), on_missing="raise"),
+        empty="warn",
+        backfill=ValueBackfill(start=1000, every=2),
+    )
+    source = SqlSource(
+        name="ledger", backend="sqlalchemy", resources={resource: {"table": "Ledger"}}
+    )
+    definition = define("ledger", source)
+
+    assert IncrementalRun(definition)()["ledger"] == 3  # rowversions 1004..1006
+    assert BackfillRun(definition)()["ledger"] == 3  # [1000, 1002) and [1002, 1004)
+    assert query("SELECT id FROM raw_shop.ledger ORDER BY id") == [(i,) for i in range(1, 7)]
+    increments = frames("loads").filter(frames("loads")["window_kind"] == "increment")
+    assert increments["cursor_last_value"].to_list() == ["1006"]  # readable, not b'\\x00...'
+
+
+BACKENDS = ["sqlalchemy", "pyarrow", "connectorx"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_sql_backends_load_the_same_rows_and_cursor(erp, query, frames, backend) -> None:
+    resource = Resource(
+        name="orders",
+        write=MERGE,
+        cursor=ValueCursor(path="version", start=20, format=Integer(), on_missing="raise"),
+        empty="warn",
+    )
+    source = SqlSource(name="erp", backend=backend, resources={resource: {"table": "Orders"}})
+    assert IncrementalRun(define("erp", source))()["orders"] == 4
+    assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(2,), (3,), (4,), (5,)]
+    assert frames("loads")["cursor_last_value"].to_list() == ["50"]

@@ -15,7 +15,7 @@ Before adding any function, class, module, flag, or dependency:
    | --- | --- |
    | Exceptions, exit codes, error location (`step`/`resource`/`window`), cause chain (`causes`, `root_cause`), failure fields (`error_fields`), masking secrets in URLs (`redact`), name validation | `core/errors.py` |
    | Window kinds (time, value, rows) and `is_last` | `core/windows.py` |
-   | How a source writes time values | `core/formats.py` (`TimeFormat` subclasses) |
+   | How a source stores cursor values (`render`/`parse`) | `core/formats.py` (`TimeFormat`, `ValueFormat` subclasses) |
    | Cursor kinds, fallbacks, dlt incremental settings | `core/cursor.py` (`Cursor`, `TimeCursor`, `ValueCursor`) |
    | Backfill declarations and their windows, `Duration` | `core/backfill.py` |
    | Write modes | `core/write.py` (`Append`, `Replace`, `Merge`) |
@@ -23,12 +23,14 @@ Before adding any function, class, module, flag, or dependency:
    | Destination, dataset, staging layout | `core/target.py` |
    | Source contract: `resource`, `validate`, `state_key`, `windows`, shared preparation | `core/source.py` |
    | Pipeline identity, registry, discovery | `core/pipeline.py` |
-   | Retry classification; `MemoryError`/permission errors never retried | `core/retry.py` |
+   | Retry policy (a configspec) and classification; `MemoryError`/permission errors never retried | `core/retry.py` |
+   | Settings every environment states (retry, monitoring, guards, notifications, logging) | `core/settings.py` |
+   | Resolving settings (`resolve`, `REQUIRED`) and registries chosen by config | `core/config.py` |
    | Decoded cursor state (one place for the state path) | `core/state.py` (`stored_cursor`) |
-   | Monitoring records → Polars frames, sinks, resource sampler, monitor | `core/monitoring/` |
+   | Monitoring records → Polars frames, sinks (write and read), sampler, monitor, backfill coverage, status | `core/monitoring/` |
    | One log format for framework and dlt lines | `core/logs.py` |
-   | Run spine, incremental vs backfill, lost-state guard, lock | `core/run.py` |
-   | Alert notifications (no logging; the CLI owns outcome lines) | `core/notify.py` |
+   | Run spine, incremental vs backfill, guards, rollback after extract, staging layout, lock | `core/run.py` |
+   | Alert channels (no logging; the CLI owns outcome lines) | `core/notify.py` |
    | Source types and their pipelines | `sources/<type>/source.py`, `sources/<type>/pipelines/` |
    | CLI and logging | `cli.py` |
 
@@ -47,13 +49,14 @@ Dependency direction is `cli` → `sources` → `core`. Source types never impor
 | New need | Goes in | Do not |
 | --- | --- | --- |
 | Feature for one source type (SQL Server rowversion casting, Shopify throttling, S3 manifest) | That source type's package only | Touch `core/` or another source type |
-| A new source type (GraphQL, MongoDB, CDC) | `sources/<type>/`: subclass `Source[ConfigT]`, implement `resource`, list `windows`, extend `validate` (and `state_key` if the cursor lives on another dlt resource) | Edit `Source.build` or `Run` |
+| A new source type (GraphQL, MongoDB, CDC) | `sources/<type>/`: subclass `Source[ConfigT]`, implement `resource`, list `windows`, extend `validate` (and `state_key` if the cursor lives on another dlt resource). Libraries the core lacks go in an extra named after the source type; declare what dlt imports only at run time in `requires()` (module -> extra); add the package to the import-linter independence contract | Edit `Source.build` or `Run`, or add the library to core dependencies |
 | One-off extraction logic | `CustomSource` generator `fn(incremental, window)` | A new source type for a single API |
-| A new time format | A `TimeFormat` subclass: in `core/formats.py` if generic, else in the source package | Branching on formats in adapters |
+| A new cursor format | A `TimeFormat` / `ValueFormat` subclass with `render` and `parse`: in `core/formats.py` if generic, else in the source package | Branching on formats in adapters |
 | A new cursor or window kind | A `Cursor` / `Window` / `Backfill` subclass in `core/` | `if kind == ...` chains |
 | A new write behaviour (hard deletes, scd2 options) | A field on, or class beside, `Merge`/`Append`/`Replace` in `core/write.py` | Hints applied in adapters |
-| A new alert channel (Slack, Teams) | A class with `send(event: RunEvent)`, passed via `Pipeline(notifiers=...)` | Channel checks in `Run` |
-| A new monitoring destination (HTTP collector, queue, warehouse) | A `Sink` subclass declaring `schemes` and implementing `from_uri`/`write` | Branching on destinations in `Monitor` |
+| A new alert channel (Teams, email) | `@notifiers.register("kind")` on a `@configspec` `Notifier` implementing `send`; its fields resolve from `[notifications.<channel>]` | Channel checks in `Run` |
+| A new monitoring destination (HTTP collector, queue, warehouse) | `@sinks.register("scheme")` on a `Sink` implementing `from_uri`/`write`/`read` | Branching on destinations in `Monitor` |
+| A new operational setting | A field on the relevant spec in `core/settings.py` (`= REQUIRED`), stated in `.dlt/config.toml` | A default in code, or `os.environ` reads |
 | A new monitored metric | A field on the relevant record in `core/monitoring/records.py` (schema derives from it), filled by `Monitor` | A second schema definition, or log lines parsed later |
 | A new run type | Subclass `Run`; set class attributes, implement `units` (and `check`) | Copy `__call__` |
 | Code two source types both need | `core/`, deliberately, with a test, once a second consumer exists | Copy it into both packages |
@@ -84,11 +87,12 @@ Dependency direction is `cli` → `sources` → `core`. Source types never impor
 | Immutable value or definition | `@dataclass(frozen=True, kw_only=True)` (add `slots=True` only if the class never calls `super()`) | `Resource`, `TimeCursor`, `Merge`, `Pipeline` |
 | Variants of one concept | ABC + one small class per variant | `WriteMode`, `TimeFormat`, `Cursor`, `Window`, `Backfill`, `Source` |
 | Shared sequence, varying steps | Template method; subclasses override hooks and class attributes | `Run.__call__` → `units`/`check`; `Source.build` → `resource`/`validate` |
-| Contract implemented outside the class tree | `typing.Protocol` | `Notifier` |
+| Implementations chosen by configuration | `Registry.register` decorator, looked up by key | sinks, notifiers, log formats |
+| Settings stated in config | dlt `@configspec`, fields `= REQUIRED` | `Retry`, `RunSettings`, `WebhookNotifier` |
 | Callable policy objects | `__call__` | `Retry`, `Run` |
 | Scoped resources | `__enter__` / `__exit__` | `PipelineLock` |
 | Pure helpers tied to one class | `@staticmethod` | `SqlSource._page`, `Retry.is_transient` |
-| Dispatch on a variant | `match` on class patterns | `TimeCursor.bounds` |
+| Dispatch on a variant | `match` on class patterns | `errors.exit_code` |
 
 Inheritance rules:
 
@@ -123,8 +127,13 @@ Inheritance rules:
 - Every behaviour change ships with a test that fails without it.
 - Use real dlt against DuckDB (fixtures in `tests/conftest.py`: `make_pipeline`, `Upstream`,
   `query`). Do not mock dlt.
-- Test the dangerous paths explicitly: the cursor or window reaching the request or SQL (capture
-  it), lost state, empty extracts, transient vs terminal errors, replayed ranges not duplicating
-  keys, production state unchanged by a backfill.
+- Test the dangerous paths explicitly: a window loading exactly its rows, lost state, empty
+  extracts, transient vs terminal errors, replayed ranges not duplicating keys, production state
+  unchanged by a backfill.
+- Test core functionality only, by its outcome: rows landed, state committed or rolled back,
+  the error type or exit code. Do not assert exact messages, log lines, table layout, rendered
+  SQL, request order or timing, a shipped config value, or one feature's internals: such a test
+  breaks a production release without a real fault. A test like that may help while building a
+  feature; remove it once the feature is done.
 - Run all gates before claiming done (commands in `SKILL.md`). Report exactly what ran and what
   did not.

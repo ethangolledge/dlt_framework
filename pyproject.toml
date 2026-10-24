@@ -7,13 +7,31 @@ name = "dlt-framework"
 version = "0.2.0"
 description = "Named dlt pipelines with incremental runs, backfills, and run monitoring"
 requires-python = ">=3.11,<3.15"
+# The core: runs, monitoring, REST and custom sources. Everything else is an extra, so a clone
+# installs only the destinations and source types its pipelines use (README: Installing).
 dependencies = [
-    "dlt[duckdb,postgres,sql_database,filesystem,s3,parquet]~=1.29.0",
+    "dlt~=1.29.0",
     "polars>=2,<3",
     "psutil>=7,<8",
     "sqlalchemy>=2.1,<3",
     "tenacity>=9.0,<10",
 ]
+
+[project.optional-dependencies]
+# Destinations
+# DuckDB 2.0 removed relation.fetchmany(), which dlt (1.29 to 1.31) still uses to read CSV.
+duckdb = ["dlt[duckdb]~=1.29.0", "duckdb>=1.5,<2"]
+postgres = ["dlt[postgres]~=1.29.0"]
+# Source types beyond REST and custom
+sql = [
+    "dlt[sql_database,parquet]~=1.29.0",
+    "numpy>=2.4,<2.5",  # the pyarrow backend; one version for every supported Python
+]
+connectorx = ["dlt-framework[sql]", "connectorx>=0.4.2,<0.5"]
+filesystem = ["dlt[filesystem,s3,parquet,duckdb]~=1.29.0", "duckdb>=1.5,<2"]  # local and S3; duckdb reads CSV
+gcs = ["dlt-framework[filesystem]", "dlt[gs]~=1.29.0"]  # gs:// buckets
+azure = ["dlt-framework[filesystem]", "dlt[az]~=1.29.0"]  # az:// and abfs:// buckets
+scrape = ["scrapling[fetchers]~=0.5.0"]  # plain HTTP; browser fetchers also need `scrapling install`
 
 [project.scripts]
 pipeline = "dlt_framework.cli:entrypoint"
@@ -38,7 +56,6 @@ addopts = "--strict-markers"
 markers = ["postgres: requires the TEST_POSTGRES_URL integration service"]
 filterwarnings = [
     "ignore:datetime.datetime.utcnow.*:DeprecationWarning:dlt.*",
-    "ignore:This process.*multi-threaded.*:DeprecationWarning:multiprocessing.*",
 ]
 
 [tool.ruff]
@@ -47,6 +64,11 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scrapling spiders are configured with class-level lists (start_urls, allowed_domains).
+"dlt_framework/sources/scrape/**" = ["RUF012"]
+"tests/test_scrape.py" = ["RUF012"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -72,5 +94,6 @@ modules = [
     "dlt_framework.sources.custom",
     "dlt_framework.sources.filesystem",
     "dlt_framework.sources.rest",
+    "dlt_framework.sources.scrape",
     "dlt_framework.sources.sql",
 ]

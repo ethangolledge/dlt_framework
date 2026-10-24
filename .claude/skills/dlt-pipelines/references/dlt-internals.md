@@ -14,6 +14,7 @@ it.
 5. Bounded (backfill) incrementals are stateless
 6. Run lifecycle and pending packages
 7. Write dispositions and the staging dataset
+7b. Async generators and libraries that hold an event loop
 8. Schemas and contracts
 9. Destructive switches
 10. Inspecting a pipeline
@@ -116,8 +117,8 @@ Consequences:
 
 - A bounded run never advances or corrupts the incremental cursor.
 - A bounded run gives no resume point. This framework deliberately keeps backfills stateless:
-  progress is logged per chunk, and an interrupted backfill is resumed by re-running from the
-  last logged chunk end.
+  every loaded window is a row in the monitoring `loads` frame, and `backfill --missing` loads the
+  gaps (`core/monitoring/coverage.py`).
 - Re-running a chunk re-loads it. Only `merge` with a stable primary key makes that idempotent.
 
 dlt also supports injecting `[start, end)` through `TimeIntervalContext`, or through
@@ -140,8 +141,13 @@ return without extracting** → `extract` → `normalize` → `load`. This frame
 separately (`Run.__call__`). It drains pending packages first with `pipeline.run([])`, then
 extracts.
 
-- An extracted package contains the state update. Deleting pending packages
-  (`drop_pending_packages`) discards both the data and its cursor advance.
+- An extracted package contains the state update, **and extract also writes it to local state**
+  (verified on 1.29.1). `drop_pending_packages()` discards the data but **not** the local cursor
+  advance: after extracting `ts=99999` and dropping, a new pipeline object, `sync_destination()`,
+  and the next run all still see 99999, so the dropped rows are skipped for good. Only
+  `pipeline.drop()` (wipe the local working dir) followed by `sync_destination()` restores the
+  destination's committed state. `Run._kept_or_discarded` does this on every non-transient
+  failure after extract; a failed extract itself leaves state untouched.
 - With `load.raise_on_failed_jobs=true`, a failed job aborts the package. Its load id never reaches
   `_dlt_loads` and its state is not visible.
 - `replace` with the default `truncate-and-insert` truncates before inserting, so it is not atomic.
@@ -162,7 +168,8 @@ The staging dataset name is `staging_dataset_name_layout % dataset_name`, which 
 `<dataset>_staging`. **Two pipelines that merge into the same dataset concurrently share the same
 staging tables and can clobber each other.** Give each pipeline its own layout
 (`dlt-docs/reference/performance.md` "Pitfalls" item 3; `dlt-docs/dlt-ecosystem/staging.md`).
-`BackfillRun` uses `%s_backfill_staging` for this reason.
+`Run.staging_layout` is `%s_staging_<run|backfill>_<pipeline>` for this reason. It is built from
+the mode, not the run name, because dlt folds `__` in dataset names to `_`.
 
 The `replace` strategy is destination-wide (`[destination] replace_strategy`), not per table. This
 repo sets `insert-from-staging` in `.dlt/config.toml`, so a replace never leaves an empty table
@@ -170,6 +177,16 @@ mid-load.
 
 Switching an existing table from `append`/`replace` to `merge` has root-key caveats; read
 `dlt-docs/general-usage/merge-loading.md` ("Switch from append/replace to merge") first.
+
+## 7b. Async generators and libraries that hold an event loop
+
+dlt advances an async-generator resource one step per asyncio task (verified on 1.29.1). A
+library that keeps an anyio task group or cancel scope open across `yield`s, such as Scrapling's
+`Spider.stream()`, must exit it in the task that entered it, so iterated by dlt directly it
+deadlocks, with or without `.parallelize()`. Run such a library whole on its own event loop in a
+worker thread and hand items to a sync generator over a bounded queue; closing the generator,
+which dlt does when a `row_order` cursor stops a resource, must stop the work
+(`sources/scrape/source.py` `_items`).
 
 ## 8. Schemas and contracts
 

@@ -1,7 +1,8 @@
 """Backfills: declared per resource, they produce the windows a backfill run loads.
 
 Time and value backfills end where the resource's cursor starts, so history and incremental runs
-meet exactly once at ``cursor.start``. Row backfills cover sources with no usable cursor.
+meet exactly once at ``cursor.start``. Row backfills cover sources with no usable cursor; their
+history is open-ended and stops at the first short page.
 """
 
 from abc import ABC, abstractmethod
@@ -10,7 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import count
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from dlt_framework.core.cursor import Cursor, TimeCursor, ValueCursor
 from dlt_framework.core.errors import ConfigurationError, DefinitionError
@@ -22,20 +23,49 @@ class Backfill(ABC):
     cursor: ClassVar[type[Cursor] | None]
 
     @abstractmethod
-    def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
-        """Chunks to load, starting at ``resume`` (as logged by a previous run) if given."""
+    def bounds(self, cursor_start: Any) -> tuple[Any, Any | None]:
+        """The declared history as ``[start, end)``; ``end`` is ``None`` when open-ended."""
+
+    @abstractmethod
+    def advance(self, origin: Any, steps: int) -> Any:
+        """The edge ``steps`` chunks after ``origin``."""
 
     def check(self, cursor: Cursor | None) -> None:
         if self.cursor is not None and not isinstance(cursor, self.cursor):
             raise DefinitionError(f"{type(self).__name__} needs a {self.cursor.__name__}")
+        start, end = self.bounds(None if cursor is None else cursor.start)
+        if end is not None and start >= end:
+            raise DefinitionError(
+                f"{type(self).__name__} start {start} must be before the cursor start {end}"
+            )
 
-    @staticmethod
-    def _position(text: str) -> int:
-        """A ``--from`` value for value and row backfills."""
+    def windows(
+        self, cursor: Cursor | None, start: Any | None = None, end: Any | None = None
+    ) -> Iterator[Window]:
+        """Chunks over the declared history, narrowed to ``[start, end)`` when given.
+
+        Chunks step from ``start``, so a range resumed from a logged window edge lines up with
+        the windows an earlier run loaded.
+        """
+        origin, limit = self.bounds(None if cursor is None else cursor.start)
+        origin = origin if start is None else start
+        if end is not None:
+            limit = end if limit is None else min(limit, end)
+        for step in count():
+            low = self.advance(origin, step)
+            if limit is not None and low >= limit:
+                return
+            high = self.advance(origin, step + 1)
+            yield self.window.between(low, high if limit is None else min(high, limit))
+
+    def edge(self, text: str) -> Any:
+        """A ``--from``/``--to`` value as this backfill's window edge."""
         try:
-            return int(text)
+            return self.window.parse_edge(text)
         except ValueError as error:
-            raise ConfigurationError(f"--from {text!r} is not an integer") from error
+            raise ConfigurationError(
+                f"{text!r} is not a {self.window.kind} window edge: {error}"
+            ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,63 +94,46 @@ class TimeBackfill(Backfill):
     start: datetime
     every: Duration
 
-    def check(self, cursor: Cursor | None) -> None:
-        super().check(cursor)
-        assert isinstance(cursor, TimeCursor)
-        if self.start >= cursor.start:
-            raise DefinitionError(f"TimeBackfill start must be before cursor start {cursor.start}")
+    def bounds(self, cursor_start: Any) -> tuple[datetime, datetime]:
+        return self.start, cursor_start
 
-    def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
-        assert isinstance(cursor, TimeCursor)
-        start = self._instant(resume) if resume else self.start
-        for step in count():
-            chunk_start = self.every.after(start, step)
-            if chunk_start >= cursor.start:
-                return
-            yield TimeWindow(chunk_start, min(self.every.after(start, step + 1), cursor.start))
-
-    @staticmethod
-    def _instant(text: str) -> datetime:
-        try:
-            instant = datetime.fromisoformat(text)
-        except ValueError as error:
-            raise ConfigurationError(f"--from {text!r} is not an ISO-8601 datetime") from error
-        if instant.tzinfo is None:
-            raise ConfigurationError(f"--from {text!r} needs a timezone, e.g. a trailing Z")
-        return instant
+    def advance(self, origin: datetime, steps: int) -> datetime:
+        return self.every.after(origin, steps)
 
 
 @dataclass(frozen=True)
 class ValueBackfill(Backfill):
+    """Fixed-width value windows. For a ``RowVersion`` cursor, ``start`` and ``every`` are the
+    integers the rowversion encodes."""
+
     window: ClassVar[type[Window]] = ValueWindow
     cursor: ClassVar[type[Cursor] | None] = ValueCursor
 
     start: int
     every: int
 
-    def check(self, cursor: Cursor | None) -> None:
-        super().check(cursor)
-        assert isinstance(cursor, ValueCursor)
-        if self.start >= cursor.start:
-            raise DefinitionError(f"ValueBackfill start must be below cursor start {cursor.start}")
+    def bounds(self, cursor_start: Any) -> tuple[int, int]:
+        return self.start, cursor_start
 
-    def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
-        assert isinstance(cursor, ValueCursor)
-        for start in range(
-            self._position(resume) if resume else self.start, cursor.start, self.every
-        ):
-            yield ValueWindow(start, min(start + self.every, cursor.start))
+    def advance(self, origin: int, steps: int) -> int:
+        return origin + self.every * steps
 
 
 @dataclass(frozen=True)
 class RowBackfill(Backfill):
-    """Pages through every row in ``size`` batches until a batch comes back short."""
+    """Pages through every row in ``size`` batches until a batch comes back short.
+
+    Offsets are positional: each page re-reads the rows before it (``OFFSET``), and rows inserted
+    meanwhile shift later pages. Prefer a ``ValueBackfill`` on an id or rowversion for large tables.
+    """
 
     window: ClassVar[type[Window]] = RowWindow
     cursor: ClassVar[type[Cursor] | None] = None
 
     size: int
 
-    def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
-        for offset in count(self._position(resume) if resume else 0, self.size):
-            yield RowWindow(offset, self.size)
+    def bounds(self, cursor_start: Any) -> tuple[int, None]:
+        return 0, None
+
+    def advance(self, origin: int, steps: int) -> int:
+        return origin + self.size * steps

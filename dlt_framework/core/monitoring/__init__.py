@@ -1,5 +1,6 @@
 """Structured run monitoring: records become Polars frames, written to a stated sink."""
 
+from dlt_framework.core.monitoring.coverage import Coverage
 from dlt_framework.core.monitoring.monitor import Monitor
 from dlt_framework.core.monitoring.records import (
     LoadRecord,
@@ -9,9 +10,11 @@ from dlt_framework.core.monitoring.records import (
     RunRecord,
     SampleRecord,
 )
-from dlt_framework.core.monitoring.sinks import DatabaseSink, ParquetSink, Sink
+from dlt_framework.core.monitoring.sinks import DatabaseSink, ParquetSink, Sink, sinks
+from dlt_framework.core.monitoring.status import status
 
 __all__ = [
+    "Coverage",
     "DatabaseSink",
     "LoadRecord",
     "Monitor",
@@ -22,4 +25,6 @@ __all__ = [
     "RunRecord",
     "SampleRecord",
     "Sink",
+    "sinks",
+    "status",
 ]

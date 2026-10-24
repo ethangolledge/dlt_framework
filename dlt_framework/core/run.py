@@ -2,8 +2,12 @@
 
 Both flavours load the same source into the same dataset through ``Run.__call__``. They differ
 only in the class attributes and hooks below: the dlt pipeline name (so state never mixes), the
-staging dataset (so concurrent merges never share staging tables), the units of work they
-extract, and the safety checks they apply.
+units of work they extract, and the safety checks they apply. Each run name has its own staging
+dataset, so pipelines sharing a dataset never share staging tables.
+
+State is never ahead of the data. dlt moves the cursor in local state during extract; if anything
+after that fails in a way the next run cannot finish, the local state is discarded and the
+destination's committed state stays the truth, so the same rows are extracted again.
 """
 
 import fcntl
@@ -11,20 +15,30 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from itertools import chain
 from pathlib import Path
 from types import TracebackType
-from typing import IO, ClassVar, Self, TypeVar
+from typing import IO, Any, ClassVar, Self, TypeVar
 
 import dlt
 from dlt.common.pipeline import ExtractInfo
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 
-from dlt_framework.core.errors import ConfigurationError, DefinitionError, GuardError, RunError
+from dlt_framework.core.errors import (
+    ConfigurationError,
+    DefinitionError,
+    GuardError,
+    RunError,
+    TransientRunError,
+)
 from dlt_framework.core.monitoring import Monitor, Sink
-from dlt_framework.core.notify import RunEvent
+from dlt_framework.core.notify import RunEvent, channels
 from dlt_framework.core.pipeline import Pipeline
 from dlt_framework.core.resource import Resource
+from dlt_framework.core.settings import RunSettings
 from dlt_framework.core.state import stored_cursor
 from dlt_framework.core.windows import Window
 
@@ -35,18 +49,30 @@ Unit = tuple[tuple[Resource, ...], Iterable[Window | None]]
 
 
 class Run(ABC):
+    """Settings, the monitoring sink, and alert channels resolve when the run is created, so a
+    configuration mistake stops it before anything is extracted."""
+
     mode: ClassVar[str]
     suffix: ClassVar[str] = ""
-    staging_layout: ClassVar[str] = "%s_staging"
     enforce_empty: ClassVar[bool] = True
 
-    def __init__(self, definition: Pipeline, sink: Sink) -> None:
+    def __init__(self, definition: Pipeline, resources: Sequence[str] | None = None) -> None:
+        definition.require_installed()
         self.definition = definition
-        self.sink = sink
+        self.resources = self._select(resources)
+        self.settings = RunSettings.of(definition.name)
+        self.sink = Sink.resolve(self.settings.monitoring.uri)
+        self.notifiers = channels(self.settings.notifications)
 
     @property
     def name(self) -> str:
         return self.definition.name + self.suffix
+
+    @property
+    def staging_layout(self) -> str:
+        """``<dataset>_staging_<mode>_<pipeline>``: one staging dataset per run name. Built from
+        the mode, not ``name``, because dlt folds the ``__`` in ``<name>__backfill`` to ``_``."""
+        return f"%s_staging_{self.mode}_{self.definition.name}"
 
     @abstractmethod
     def units(self) -> Iterable[Unit]:
@@ -61,7 +87,13 @@ class Run(ABC):
 
     def __call__(self) -> Counter[str]:
         rows: Counter[str] = Counter()
-        monitor = Monitor(self.sink, self.definition, dlt_pipeline=self.name, mode=self.mode)
+        monitor = Monitor(
+            self.sink,
+            self.definition,
+            self.settings.monitoring,
+            dlt_pipeline=self.name,
+            mode=self.mode,
+        )
         with monitor:
             try:
                 pipeline = dlt.pipeline(
@@ -85,12 +117,23 @@ class Run(ABC):
         self._notify(RunEvent(self.name, self.mode, rows))
         return rows
 
+    def _select(self, names: Sequence[str] | None) -> tuple[Resource, ...]:
+        declared = {resource.name: resource for resource in self.definition.source.resources}
+        if names is None:
+            return tuple(declared.values())
+        if unknown := sorted(set(names) - set(declared)):
+            raise ConfigurationError(
+                f"{self.definition.name} has no resource {unknown}; it has {sorted(declared)}"
+            )
+        return tuple(declared[name] for name in dict.fromkeys(names))
+
     def _prepare(self, pipeline: dlt.Pipeline) -> None:
-        retry = self.definition.retry
+        retry = self.settings.retry
         retry("sync", pipeline.sync_destination)
         if pipeline.has_pending_data:
             LOGGER.warning("Loading pending packages from an interrupted run", extra=self._log())
-            retry("pending", lambda: pipeline.run([]))
+            with self._kept_or_discarded(pipeline):
+                retry("pending", lambda: pipeline.run([]))
         self.check(pipeline)
 
     def _load(
@@ -110,12 +153,12 @@ class Run(ABC):
                     schema_contract=self.definition.schema_contract,
                 ),
             )
-            (load_id,) = info.loads_ids  # one source extracted, so one package
-            rows = self._row_counts(info, resources)
-            if self.enforce_empty:
-                self._check_empty(pipeline, resources, rows)
-            self._timed(timings, "normalize", pipeline.normalize)
-            self._timed(timings, "load", pipeline.load)
+            with self._kept_or_discarded(pipeline):
+                (load_id,) = info.loads_ids  # one source extracted, so one package
+                rows = self._row_counts(info, resources)
+                self._check_extracted(pipeline, resources, rows)
+                self._timed(timings, "normalize", pipeline.normalize)
+                self._timed(timings, "load", pipeline.load)
         except RunError as error:
             error.locate(
                 ", ".join(resource.name for resource in resources), str(window or "increment")
@@ -127,30 +170,83 @@ class Run(ABC):
         LOGGER.info("Loaded %s: %s", window or "increment", dict(rows), extra=self._log())
         return rows
 
-    def _timed(self, timings: dict[str, float], step: str, call: Callable[[], T]) -> T:
-        started = time.monotonic()
-        result = self.definition.retry(step, call)
-        timings[step] = time.monotonic() - started
-        return result
+    @contextmanager
+    def _kept_or_discarded(self, pipeline: dlt.Pipeline) -> Iterator[None]:
+        """Work after an extract: on a failure the next run cannot finish, discard local state.
 
-    def _check_empty(
+        A transient failure or an interrupt keeps the extracted package, and the next run loads it
+        with its state. Anything else (a guard, a schema contract, a terminal load error) would
+        leave the cursor past rows that never landed, so the local working state is dropped and
+        the next run restores the destination's committed state and extracts them again.
+        """
+        try:
+            yield
+        except (TransientRunError, KeyboardInterrupt):
+            raise
+        except BaseException:
+            pipeline.drop()
+            LOGGER.warning(
+                "Discarded the extracted package and local state; the destination's committed "
+                "state is kept, so the next run extracts these rows again",
+                extra=self._log(),
+            )
+            raise
+
+    def _check_extracted(
         self, pipeline: dlt.Pipeline, resources: Iterable[Resource], rows: Counter[str]
     ) -> None:
+        """Guards between extract and load, while nothing is committed yet."""
+        self._check_cursors(pipeline, resources, "extract")
+        if not self.enforce_empty:
+            return
         for resource in resources:
             if rows[resource.name] or resource.empty == "allow":
                 continue
             if resource.empty == "warn":
                 LOGGER.warning("%s extracted no rows", resource.name, extra=self._log())
                 continue
-            pipeline.drop_pending_packages()
             raise GuardError(
                 f"{resource.name} extracted no rows and its empty policy is 'fail'; nothing was "
                 "loaded. Check upstream filters and credentials, or set empty='allow'",
                 step="extract",
             )
 
+    def _check_cursors(
+        self, pipeline: dlt.Pipeline, resources: Iterable[Resource], step: str
+    ) -> None:
+        """Refuse a time cursor ahead of now: every row before that date would be skipped."""
+        tolerance = timedelta(seconds=self.settings.guards.future_cursor_tolerance_s)
+        limit = datetime.now(UTC) + tolerance
+        for resource in resources:
+            stored = stored_cursor(pipeline, self.definition.source, resource)
+            if resource.cursor is None or stored is None:
+                continue
+            last_value = stored.get("last_value")
+            if last_value is not None and resource.cursor.beyond(last_value, limit):
+                found = resource.cursor.format.describe(last_value)
+                remedy = (
+                    "nothing was committed"
+                    if step == "extract"
+                    else f"it is already stored; reset it with `dlt pipeline {self.name} drop "
+                    f"{resource.name} --state-only`, then backfill what it skipped"
+                )
+                raise GuardError(
+                    f"{resource.name} cursor {resource.cursor.tracked_path} is at {found}, more "
+                    f"than {tolerance} ahead of now: upstream holds a bad value. Fix or filter "
+                    f"that row; {remedy}",
+                    step=step,
+                )
+
+    def _timed(self, timings: dict[str, float], step: str, call: Callable[[], T]) -> T:
+        started = time.monotonic()
+        result = self.settings.retry(step, call)
+        timings[step] = time.monotonic() - started
+        return result
+
     def _notify(self, event: RunEvent) -> None:
-        for notifier in self.definition.notifiers:
+        if event.outcome not in self.settings.notifications.on:
+            return
+        for notifier in self.notifiers:
             try:
                 notifier.send(event)
             except Exception:
@@ -171,29 +267,36 @@ class Run(ABC):
 
 
 class IncrementalRun(Run):
-    """Loads every resource from its stored cursor under the production pipeline name."""
+    """Loads resources from their stored cursors under the production pipeline name."""
 
     mode = "run"
 
-    def __init__(self, definition: Pipeline, sink: Sink, allow_initial_load: bool = False) -> None:
-        super().__init__(definition, sink)
+    def __init__(
+        self,
+        definition: Pipeline,
+        resources: Sequence[str] | None = None,
+        allow_initial_load: bool = False,
+    ) -> None:
+        super().__init__(definition, resources)
         self.allow_initial_load = allow_initial_load
 
     def units(self) -> Iterable[Unit]:
-        return [(tuple(self.definition.source.resources), (None,))]
+        return [(self.resources, (None,))]
 
     def check(self, pipeline: dlt.Pipeline) -> None:
-        """Refuse to restart a cursor from its start over a table that already has data.
+        """Refuse a cursor already stored ahead of now, and a cursor restarting from its start
+        over a table that already has data.
 
-        That combination means state was not found: the pipeline, source, or resource was
-        renamed, or the dataset or destination changed. dlt would silently reload from the start.
+        The second means state was not found: the pipeline, source, or resource was renamed, or
+        the dataset or destination changed. dlt would silently reload from the start.
         """
+        self._check_cursors(pipeline, self.resources, "check")
         if self.allow_initial_load:
             return
         source = self.definition.source
         lost = [
             resource.name
-            for resource in source.resources
+            for resource in self.resources
             if resource.cursor
             and stored_cursor(pipeline, source, resource) is None
             and self._has_rows(pipeline, resource.name)
@@ -220,40 +323,40 @@ class BackfillRun(Run):
     """Loads history under ``<name>__backfill`` from each resource's declared backfill.
 
     Resources are backfilled one at a time. Time and value windows bound the cursor with
-    ``end_value``, so dlt never reads or moves the run state. Nothing is checkpointed: resume an
-    interrupted backfill with ``--resource`` and ``--from`` set to the end of the last loaded
-    window, as logged.
+    ``end_value``, so dlt never reads or moves the run state. ``ranges`` narrows a resource to
+    ``[start, end)`` edges (``--from``/``--to``, or the gaps ``--missing`` found); an edge of
+    ``None`` is the declared start or end. A resource mapped to no ranges has nothing to load.
     """
 
     mode = "backfill"
     suffix = "__backfill"
-    staging_layout = "%s_backfill_staging"
     enforce_empty = False
 
     def __init__(
         self,
         definition: Pipeline,
-        sink: Sink,
-        resource: str | None = None,
-        resume: str | None = None,
+        resources: Sequence[str] | None = None,
+        ranges: Mapping[str, Sequence[tuple[Any, Any]]] | None = None,
     ) -> None:
-        super().__init__(definition, sink)
-        if resume is not None and resource is None:
-            raise ConfigurationError("--from needs --resource: resume points are per resource")
-        self.resume = resume
-        self.resources = tuple(
-            item
-            for item in definition.source.resources
-            if item.backfill is not None and resource in (None, item.name)
-        )
+        super().__init__(definition, resources)
+        self.resources = tuple(item for item in self.resources if item.backfill is not None)
         if not self.resources:
-            target = f"resource {resource!r}" if resource else "any resource"
-            raise DefinitionError(f"Pipeline {definition.name} declares no backfill for {target}")
+            raise DefinitionError(
+                f"Pipeline {definition.name} declares no backfill for these resources"
+            )
+        self.ranges = ranges or {}
 
     def units(self) -> Iterable[Unit]:
         for resource in self.resources:
-            assert resource.backfill is not None
-            yield (resource,), resource.backfill.windows(resource.cursor, self.resume)
+            backfill = resource.backfill
+            assert backfill is not None
+            ranges = self.ranges.get(resource.name, [(None, None)])
+            yield (
+                (resource,),
+                chain.from_iterable(
+                    backfill.windows(resource.cursor, start, end) for start, end in ranges
+                ),
+            )
 
 
 class PipelineLock:

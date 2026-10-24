@@ -5,7 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.3@sha256:90bbb3c16635e9627f49eec6539f956d7
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DLT_DATA_DIR=/var/lib/dlt \
-    LOG_FORMAT=json
+    LOGGING__FORMAT=json
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends tini \
@@ -17,14 +17,19 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# The extras this image needs: its destinations and source types, stated at build time, e.g.
+#   docker build --build-arg EXTRAS="--extra postgres --extra sql" .
+ARG EXTRAS
+RUN test -n "$EXTRAS" || { echo 'State EXTRAS, e.g. --build-arg EXTRAS="--extra postgres"'; exit 1; }
+
 COPY pyproject.toml uv.lock ./
 COPY .dlt ./.dlt
 
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project $EXTRAS
 
 COPY dlt_framework ./dlt_framework
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev $EXTRAS
 
 USER dlt
 VOLUME ["/var/lib/dlt"]

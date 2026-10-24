@@ -87,6 +87,11 @@ class ResourceRecord(Record):
     definition: str
 
     @staticmethod
+    def key(pipeline: str, resource: str) -> str:
+        """``resource_id``: ``<pipeline>.<resource>``."""
+        return f"{pipeline}.{resource}"
+
+    @staticmethod
     def describe(resource: Resource) -> dict[str, Any]:
         """The definition columns, also shown by ``pipeline list``."""
         cursor, backfill = resource.cursor, resource.backfill
@@ -95,7 +100,7 @@ class ResourceRecord(Record):
             "write_mode": type(resource.write).__name__,
             "cursor_kind": type(cursor).__name__ if cursor else None,
             "cursor_path": cursor.tracked_path if cursor else None,
-            "cursor_start": str(cursor.initial_value) if cursor else None,
+            "cursor_start": cursor.format.describe(cursor.initial_value) if cursor else None,
             "backfill_kind": type(backfill).__name__ if backfill else None,
             "empty": resource.empty,
             "definition": repr(resource),

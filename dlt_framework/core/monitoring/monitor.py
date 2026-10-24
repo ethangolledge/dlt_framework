@@ -25,6 +25,7 @@ from dlt_framework.core.monitoring.sampler import ResourceSampler
 from dlt_framework.core.monitoring.sinks import Sink
 from dlt_framework.core.pipeline import Pipeline
 from dlt_framework.core.resource import Resource
+from dlt_framework.core.settings import MonitoringSettings
 from dlt_framework.core.windows import Window
 
 LOGGER = logging.getLogger(__name__)
@@ -32,8 +33,8 @@ LOGGER = logging.getLogger(__name__)
 
 class Monitor:
     """Writes a ``started`` record and the definition rows on entry, a ``loads`` record per
-    resource and window, resource samples every ``flush_s`` seconds, and a ``succeeded``/``failed``
-    record at the end.
+    resource and window, resource samples (taken every ``sample_every_s``, written every
+    ``flush_every_s``), and a ``succeeded``/``failed`` record at the end.
 
     Records are written as they happen, so a killed run still leaves its start and its memory
     trend. A failing sink is logged and never changes the run's outcome.
@@ -43,18 +44,17 @@ class Monitor:
         self,
         sink: Sink,
         definition: Pipeline,
+        settings: MonitoringSettings,
         *,
         dlt_pipeline: str,
         mode: str,
-        interval_s: float = 15.0,
-        flush_s: float = 60.0,
     ) -> None:
         self.sink = sink
         self.run_id = uuid.uuid4().hex
         self.definition, self.dlt_pipeline, self.mode = definition, dlt_pipeline, mode
-        self.flush_s = flush_s
+        self.flush_s = settings.flush_every_s
         self.memory_limit_mb = ResourceSampler.memory_limit_mb()
-        self._sampler = ResourceSampler(interval_s, self._sampled)
+        self._sampler = ResourceSampler(settings.sample_every_s, self._sampled)
         self._samples: list[Record] = []
         self._lock = threading.Lock()
         self._flushed_at = time.monotonic()
@@ -88,6 +88,7 @@ class Monitor:
     ) -> None:
         start, end = window.span() if window else (None, None)
         last_value = cursor_state.get("last_value") if cursor_state else None
+        cursor = resource.cursor
         self._write(
             LoadRecord(
                 load_id=load_id,
@@ -101,7 +102,11 @@ class Monitor:
                 extract_s=timings.get("extract", 0.0),
                 normalize_s=timings.get("normalize", 0.0),
                 load_s=timings.get("load", 0.0),
-                cursor_last_value=None if last_value is None else str(last_value),
+                cursor_last_value=(
+                    None
+                    if cursor is None or last_value is None
+                    else cursor.format.describe(last_value)
+                ),
             )
         )
 
@@ -140,7 +145,7 @@ class Monitor:
         )
 
     def _resource_id(self, resource: Resource) -> str:
-        return f"{self.definition.name}.{resource.name}"
+        return ResourceRecord.key(self.definition.name, resource.name)
 
     def _run_record(self, event: str, **details: Any) -> RunRecord:
         return RunRecord(

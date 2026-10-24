@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlparse
 
 from dlt.extract.resource import DltResource
 from dlt.sources.filesystem import filesystem, read_csv_duckdb, read_jsonl, read_parquet
@@ -13,6 +14,19 @@ from dlt_framework.core.source import Source
 from dlt_framework.core.windows import TimeWindow, Window
 
 _READERS: dict[str, Any] = {"csv": read_csv_duckdb, "jsonl": read_jsonl, "parquet": read_parquet}
+# What dlt imports at read time, mapped to the extra that installs it.
+_READER_MODULES = {
+    "csv": {"duckdb": "filesystem"},
+    "jsonl": {},
+    "parquet": {"pyarrow": "filesystem"},
+}
+_PROTOCOL_MODULES = {
+    "s3": {"s3fs": "filesystem"},
+    "gs": {"gcsfs": "gcs"},
+    "gcs": {"gcsfs": "gcs"},
+    "az": {"adlfs": "azure"},
+    "abfs": {"adlfs": "azure"},
+}
 MODIFICATION_DATE = "modification_date"
 
 
@@ -48,6 +62,13 @@ class FilesystemSource(Source[Files]):
                 f"{resource.name!r}: a filesystem cursor is TimeCursor(path='{MODIFICATION_DATE}') "
                 "without fallbacks"
             )
+
+    def requires(self) -> dict[str, str]:
+        needed: dict[str, str] = {}
+        for files in self.resources.values():
+            needed |= _READER_MODULES[files.reader]
+            needed |= _PROTOCOL_MODULES.get(urlparse(files.bucket_url).scheme, {})
+        return needed
 
     def state_key(self, resource: Resource) -> str:
         # The cursor lives on the file listing, which dlt names "<listing>_<reader resource>".

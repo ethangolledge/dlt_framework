@@ -9,6 +9,12 @@ from dlt.common.destination import Destination
 
 from dlt_framework.core.errors import ConfigurationError, require_identifier
 
+# The driver each supported destination's extra installs: import name -> extra.
+_DRIVERS: dict[str, dict[str, str]] = {
+    "duckdb": {"duckdb": "duckdb"},
+    "postgres": {"psycopg2": "postgres"},
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Target:
@@ -23,6 +29,10 @@ class Target:
 
     def __post_init__(self) -> None:
         require_identifier(self.dataset, "Dataset")
+
+    def requires(self) -> dict[str, str]:
+        """Modules loading here needs beyond the core, mapped to the extra that installs them."""
+        return _DRIVERS.get(self.destination, {})
 
     def factory(self, staging_layout: str) -> Destination[Any, Any]:
         """The dlt destination, with a staging dataset private to the calling run type."""
