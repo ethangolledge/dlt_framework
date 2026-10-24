@@ -1,1 +1,0 @@
-VALUE = "not a source"

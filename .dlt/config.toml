@@ -1,14 +1,72 @@
-# Non-secret defaults. Credentials belong in environment variables or ignored
-# .dlt/secrets.toml.
+# How runs behave in this environment. What lands, and where, is in the pipeline definitions;
+# this file states everything operational, and every framework key below is required.
+#
+# Precedence, highest first: environment variables (RETRY__ATTEMPTS=3), then a per-pipeline
+# section, then the shared one. A per-pipeline section only needs the keys it changes:
+#
+#   [pipelines.acme_shop.retry]
+#   give_up_after_s = 3600
+#
+# Secrets (monitoring.uri, webhook urls, credentials) go in .dlt/secrets.toml or the environment.
+
+[logging]
+format = "text"   # text | json (any registered log format)
+level = "INFO"
+
+[retry]
+# A failing step (sync, extract, normalize, load) is retried while dlt deems the error transient,
+# with jittered exponential waits from initial_wait_s up to max_wait_s. It gives up after
+# `attempts`, or once give_up_after_s has passed: size that to the longest outage of a database
+# or API that a run should ride out. Terminal errors (bad credentials, schema contract) and
+# MemoryError are never retried.
+attempts = 8
+initial_wait_s = 5
+max_wait_s = 120
+give_up_after_s = 900
+
+[monitoring]
+# Memory and CPU are sampled every sample_every_s and written every flush_every_s, so a run
+# killed for OOM still leaves its memory trend. uri is a secret.
+sample_every_s = 15
+flush_every_s = 60
+
+[guards]
+# A time cursor further than this ahead of now is refused before it is committed: one row dated
+# in the future would otherwise stop the cursor until that date. Covers clock skew between the
+# source and this host.
+future_cursor_tolerance_s = 3600
+
+[notifications]
+on = ["failed"]   # failed | succeeded
+channels = []     # names of [notifications.<channel>] sections, e.g. ["ops"]
+# [notifications.ops]
+# kind = "webhook"  # notifications.ops.url is a secret
+
+# ---- dlt -------------------------------------------------------------------------------------
+
 [runtime]
-log_level = "INFO"
-log_format = "JSON"
+# dlt speaks only when something is wrong; the framework logs progress and writes monitoring
+# frames. Its lines go through the framework's handler, so [logging] format controls every line.
+log_level = "WARNING"
+# dlt's HTTP client (REST sources, webhooks) retries each request itself before a step fails.
+request_max_attempts = 5
+request_backoff_factor = 1
+request_max_retry_delay = 300
 
 [extract]
+# Resources of one source extract in parallel threads. Serialise a rate-limited upstream with
+# [sources.<source name>.extract] workers = 1.
 workers = 5
+
+[data_writer]
+# Rotate intermediate files so one large table normalizes and loads in parallel.
+file_max_items = 100000
 
 [normalize]
 workers = 3
+# Workers start as fresh processes. dlt would otherwise fork them from a process already running
+# threads (extract and load pools, the resource sampler, Polars), which can deadlock the child.
+start_method = "spawn"
 
 [load]
 workers = 5
@@ -19,3 +77,7 @@ start_new_jobs_on_signal = true
 
 [pipelines]
 restore_from_destination = true
+
+[destination]
+# Replace loads into staging, then swaps inside one transaction: no empty-table window.
+replace_strategy = "insert-from-staging"

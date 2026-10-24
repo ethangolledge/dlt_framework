@@ -1,18 +1,8 @@
-.git
-.gitignore
-.env
-.env.*
-!.env.example
-.venv
-.dlt/*
+# Allowlist: only what the image needs enters the build context, so local secrets, state, and
+# data can never be copied in by accident.
+*
+!pyproject.toml
+!uv.lock
 !.dlt/config.toml
-.pytest_cache
-.agents
-.codex
+!dlt_framework/
 **/__pycache__
-**/*.py[cod]
-**/*.duckdb
-build
-dist
-*.egg-info
-tests
