@@ -1,7 +1,5 @@
 """REST APIs through dlt's declarative ``rest_api`` source."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 

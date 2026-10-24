@@ -11,7 +11,7 @@ from dlt_framework.core.formats import (
     UnixMillis,
     UnixSeconds,
 )
-from dlt_framework.core.notify import LogNotifier, Notifier, RunEvent
+from dlt_framework.core.notify import Notifier, RunEvent
 from dlt_framework.core.pipeline import FREEZE_DATA_TYPES, Pipeline
 from dlt_framework.core.resource import Resource
 from dlt_framework.core.retry import Retry
@@ -25,7 +25,6 @@ __all__ = [
     "DateOnly",
     "Duration",
     "IsoTimestamp",
-    "LogNotifier",
     "Merge",
     "NaiveDatetime",
     "Notifier",

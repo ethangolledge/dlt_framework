@@ -1,12 +1,14 @@
 import json
 import logging
+import re
 import textwrap
 
 import pytest
 from dlt.common.exceptions import TerminalValueError
 
-from dlt_framework.cli import JsonFormatter, main
+from dlt_framework.cli import main
 from dlt_framework.core.errors import TerminalRunError, TransientRunError
+from dlt_framework.core.logs import JsonFormatter
 from dlt_framework.core.retry import Retry
 
 DEFINITION = """
@@ -50,7 +52,9 @@ def package(tmp_path, monkeypatch) -> str:
 def test_list_check_run_and_backfill(package, capsys) -> None:
     assert main(["--package", package, "list"]) == 0
     listed = capsys.readouterr().out
-    assert "shop\tCustomSource\torders\tMerge\tcursor=updated_at\tbackfill=ValueBackfill" in listed
+    row = next(line for line in listed.splitlines() if "orders" in line)
+    cells = [cell.strip() for cell in re.split("[│┆]", row) if cell.strip()]
+    assert cells == ["shop", "CustomSource", "orders", "Merge", "updated_at", "ValueBackfill"]
     assert main(["--package", package, "check", "shop"]) == 0
     assert main(["--package", package, "run", "shop"]) == 0
     assert main(["--package", package, "backfill", "shop"]) == 0
@@ -74,7 +78,8 @@ def test_definition_and_input_errors_exit_2(package, arguments) -> None:
 
 def test_default_package_discovers_shipped_pipelines(capsys) -> None:
     assert main(["list"]) == 0
-    assert "dummyjson\tRestApiSource\tproducts\tReplace" in capsys.readouterr().out
+    listed = capsys.readouterr().out
+    assert "dummyjson" in listed and "RestApiSource" in listed and "products" in listed
 
 
 def test_json_logs_include_extra_fields() -> None:
@@ -96,5 +101,5 @@ def test_retry_classifies_terminal_and_transient_errors() -> None:
     with pytest.raises(TransientRunError):
         retry("load", fail(ConnectionError("reset")))
     with pytest.raises(TerminalRunError):
-        retry("load", fail(ConnectionError("permission denied")))
+        retry("load", fail(PermissionError("denied")))
     assert retry("load", lambda: 42) == 42

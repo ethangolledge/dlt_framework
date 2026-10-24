@@ -10,7 +10,7 @@ from dlt_framework.sources.custom import CustomSource
 
 
 @pytest.mark.postgres
-def test_postgres_run_and_backfill(monkeypatch) -> None:
+def test_postgres_run_and_backfill(monkeypatch, sink) -> None:
     credentials = os.environ.get("TEST_POSTGRES_URL")
     if not credentials:
         pytest.skip("TEST_POSTGRES_URL is not configured")
@@ -26,8 +26,8 @@ def test_postgres_run_and_backfill(monkeypatch) -> None:
         retry=Retry(attempts=1),
     )
 
-    IncrementalRun(definition)()
-    BackfillRun(definition)()
+    IncrementalRun(definition, sink)()
+    BackfillRun(definition, sink)()
 
     with psycopg2.connect(credentials) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT id FROM raw_ci.orders ORDER BY id")

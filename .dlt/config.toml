@@ -1,8 +1,9 @@
 # Non-secret defaults. Credentials belong in environment variables or ignored
 # .dlt/secrets.toml.
 [runtime]
-log_level = "INFO"
-log_format = "JSON"
+# dlt speaks only when something is wrong; the framework logs progress and writes monitoring
+# frames. Its lines go through the framework's handler, so LOG_FORMAT controls every line.
+log_level = "WARNING"
 
 [extract]
 workers = 5

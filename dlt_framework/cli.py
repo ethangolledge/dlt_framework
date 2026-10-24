@@ -1,20 +1,30 @@
-"""Command line: ``dlt-framework run|backfill|list|check``."""
-
-from __future__ import annotations
+"""Command line: ``pipeline run|backfill|list|check``."""
 
 import argparse
-import json
 import logging
 import os
+from collections import Counter
 from collections.abc import Sequence
 
-from dlt_framework.core.errors import RunError
+import dlt
+import polars as pl
+
+from dlt_framework.core import logs
+from dlt_framework.core.errors import (
+    ConfigurationError,
+    RunError,
+    error_fields,
+    exit_code,
+    root_cause,
+)
+from dlt_framework.core.monitoring import ResourceRecord, Sink
+from dlt_framework.core.notify import summarise
 from dlt_framework.core.pipeline import Pipeline
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 
 LOGGER = logging.getLogger(__name__)
 SOURCES_PACKAGE = "dlt_framework.sources"
-_STANDARD_RECORD_KEYS = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
+_LIST_COLUMNS = ("resource", "write_mode", "cursor_path", "backfill_kind")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -26,28 +36,76 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "check":
             _check(Pipeline.get(args.pipeline))
         elif args.command == "run":
-            IncrementalRun(Pipeline.get(args.pipeline), args.allow_initial_load)()
+            rows = IncrementalRun(Pipeline.get(args.pipeline), _sink(), args.allow_initial_load)()
+            _log_success(args, rows)
         else:
-            BackfillRun(Pipeline.get(args.pipeline), args.resource, args.resume)()
-    except RunError as error:
-        LOGGER.error("%s", error, extra={"event": "run_failed", "error_type": type(error).__name__})
-        return error.exit_code
-    except KeyboardInterrupt:
-        LOGGER.warning("Interrupted", extra={"event": "run_interrupted"})
-        return 130
+            rows = BackfillRun(Pipeline.get(args.pipeline), _sink(), args.resource, args.resume)()
+            _log_success(args, rows)
+    except (Exception, KeyboardInterrupt) as error:
+        _log_failure(args, error)
+        return exit_code(error)
     return 0
 
 
+def _sink() -> Sink:
+    """The monitoring sink for this environment: ``monitoring.uri`` / ``MONITORING__URI``."""
+    uri: str | None = dlt.secrets.get("monitoring.uri")
+    if not uri:
+        raise ConfigurationError(
+            "monitoring.uri is not set; state where run monitoring goes, e.g. "
+            "MONITORING__URI=file:///data/monitoring or a database URL"
+        )
+    return Sink.resolve(str(uri))
+
+
+def _log_success(args: argparse.Namespace, rows: Counter[str]) -> None:
+    LOGGER.info(
+        "%s %s succeeded: %s",
+        args.command,
+        args.pipeline,
+        summarise(rows),
+        extra={"event": "run_succeeded", "rows": rows.total()},
+    )
+
+
+def _log_failure(args: argparse.Namespace, error: BaseException) -> None:
+    """One line saying what failed and where, then the root cause's traceback.
+
+    A framework error raised by the framework itself is its own explanation and has no traceback;
+    anything else, including an unexpected bug (exit 1), keeps one.
+    """
+    target = f"{args.command} {getattr(args, 'pipeline', '')}".strip()
+    if isinstance(error, KeyboardInterrupt):
+        LOGGER.warning("%s interrupted", target, extra={"event": "run_interrupted"})
+        return
+    cause = root_cause(error)
+    fields = error_fields(error)
+    location = error.location if isinstance(error, RunError) else ""
+    LOGGER.error(
+        "%s failed%s: %s (%s, exit %s)",
+        target,
+        f" in {location}" if location else "",
+        error,
+        fields["error_type"],
+        fields["exit_code"],
+        exc_info=None if isinstance(cause, RunError) else (type(cause), cause, cause.__traceback__),
+        extra={"event": "run_failed", **fields},
+    )
+
+
 def _list() -> None:
-    for name, definition in sorted(Pipeline.registry.items()):
-        source = type(definition.source).__name__
-        for resource in definition.source.resources:
-            cursor = resource.cursor.tracked_path if resource.cursor else "-"
-            backfill = type(resource.backfill).__name__ if resource.backfill else "-"
-            write = type(resource.write).__name__
-            print(
-                f"{name}\t{source}\t{resource.name}\t{write}\tcursor={cursor}\tbackfill={backfill}"
-            )
+    rows = [
+        {
+            "pipeline": name,
+            "source": type(definition.source).__name__,
+            **{column: ResourceRecord.describe(resource)[column] for column in _LIST_COLUMNS},
+        }
+        for name, definition in sorted(Pipeline.registry.items())
+        for resource in definition.source.resources
+    ]
+    schema = dict.fromkeys(("pipeline", "source", *_LIST_COLUMNS), pl.String)
+    with pl.Config(tbl_rows=-1, tbl_hide_dataframe_shape=True, tbl_hide_column_data_types=True):
+        print(pl.DataFrame(rows, schema=schema).fill_null("-"))
 
 
 def _check(definition: Pipeline) -> None:
@@ -62,7 +120,7 @@ def _check(definition: Pipeline) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dlt-framework")
+    parser = argparse.ArgumentParser(prog="pipeline")
     parser.add_argument("--package", default=SOURCES_PACKAGE, help="where pipelines are defined")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="list pipelines and their resources")
@@ -82,23 +140,8 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "time": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            **{k: v for k, v in vars(record).items() if k not in _STANDARD_RECORD_KEYS},
-        }
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, default=str)
-
-
 def entrypoint() -> None:
-    handler = logging.StreamHandler()
-    if os.environ.get("LOG_FORMAT", "text").lower() == "json":
-        handler.setFormatter(JsonFormatter())
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), handlers=[handler], force=True)
+    logs.configure(
+        os.environ.get("LOG_FORMAT", "text").lower(), os.environ.get("LOG_LEVEL", "INFO")
+    )
     raise SystemExit(main())

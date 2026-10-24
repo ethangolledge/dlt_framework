@@ -1,0 +1,16 @@
+# Pinned actions, image digests, and the uv lock only stay safe if they are updated: Dependabot
+# opens a PR per update, and CI must pass before it merges.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly

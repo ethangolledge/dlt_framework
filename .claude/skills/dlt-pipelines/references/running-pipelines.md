@@ -52,7 +52,7 @@ only in class attributes and the `units` / `check` hooks:
 
 | | `IncrementalRun` | `BackfillRun` |
 | --- | --- | --- |
-| Command | `dlt-framework run NAME [--allow-initial-load]` | `dlt-framework backfill NAME [--resource R --from RESUME]` |
+| Command | `pipeline run NAME [--allow-initial-load]` | `pipeline backfill NAME [--resource R --from RESUME]` |
 | dlt pipeline name | `NAME` | `NAME__backfill` |
 | Dataset / tables | `Target.dataset` | same dataset, same tables |
 | Units | one: all resources, window `None` (resume from stored cursor) | one per resource with a declared `backfill`, over its windows |
@@ -86,8 +86,8 @@ Write mode is always your stated choice. Replaying a backfill chunk is idempoten
 1. Choose the boundary `T`: a UTC instant, normally the start of the current day.
 2. Declare the cursor with `start=T`, and a backfill whose `start` is the earliest history you
    need. The backfill ends at `T` by construction, half-open, so `T` is loaded exactly once.
-3. Run `dlt-framework run NAME`. The first run loads `[T, now)` and stores the cursor.
-4. Run `dlt-framework backfill NAME`. Steps 3 and 4 are independent and may overlap.
+3. Run `pipeline run NAME`. The first run loads `[T, now)` and stores the cursor.
+4. Run `pipeline backfill NAME`. Steps 3 and 4 are independent and may overlap.
 5. Verify with `dlt pipeline -v NAME info` that `last_value` advanced. Check the per-window row
    counts in the backfill logs.
 
@@ -99,7 +99,7 @@ Write mode is always your stated choice. Replaying a backfill chunk is idempoten
 | G2 Upstream binding | Cursor filtering only client-side while the request pulls everything (`dlt-internals.md` §4) | Per-source tests capturing the outbound request or SQL (`tests/test_sources.py`); every new source type or framework key needs one |
 | G3 Lost-state guard | Renamed identity, wrong dataset, or new destination restarting from cursor start over existing data | `IncrementalRun.check` with `Source.state_key`; override deliberately with `--allow-initial-load` |
 | G4 Immutable identity | Accidental renames | §1 rules; `Pipeline` rejects duplicate names |
-| G5 Pre-flight | Unknown `start_value` after a change | `dlt-framework check NAME`, then inspect `dlt pipeline -v NAME info` or the `Bind incremental` log |
+| G5 Pre-flight | Unknown `start_value` after a change | `pipeline check NAME`, then compare `cursor_start` (`resources` frame) with `cursor_last_value` (`loads` frame, joined on `run_id`, `resource_id`) (or `dlt pipeline -v NAME info`) |
 | G6 History only via backfill | History loaded through `run` | §2 |
 | G7 Ordered stop only on ordered data | `row_order` skipping rows | Set `row_order` only when upstream ordering is documented and tested |
 

@@ -13,7 +13,7 @@ Before adding any function, class, module, flag, or dependency:
 
    | Concept | Lives in |
    | --- | --- |
-   | Exceptions, exit codes, name validation | `core/errors.py` |
+   | Exceptions, exit codes, error location (`step`/`resource`/`window`), cause chain (`causes`, `root_cause`), failure fields (`error_fields`), masking secrets in URLs (`redact`), name validation | `core/errors.py` |
    | Window kinds (time, value, rows) and `is_last` | `core/windows.py` |
    | How a source writes time values | `core/formats.py` (`TimeFormat` subclasses) |
    | Cursor kinds, fallbacks, dlt incremental settings | `core/cursor.py` (`Cursor`, `TimeCursor`, `ValueCursor`) |
@@ -23,9 +23,12 @@ Before adding any function, class, module, flag, or dependency:
    | Destination, dataset, staging layout | `core/target.py` |
    | Source contract: `resource`, `validate`, `state_key`, `windows`, shared preparation | `core/source.py` |
    | Pipeline identity, registry, discovery | `core/pipeline.py` |
-   | Retry classification | `core/retry.py` |
+   | Retry classification; `MemoryError`/permission errors never retried | `core/retry.py` |
+   | Decoded cursor state (one place for the state path) | `core/state.py` (`stored_cursor`) |
+   | Monitoring records → Polars frames, sinks, resource sampler, monitor | `core/monitoring/` |
+   | One log format for framework and dlt lines | `core/logs.py` |
    | Run spine, incremental vs backfill, lost-state guard, lock | `core/run.py` |
-   | Notifications | `core/notify.py` |
+   | Alert notifications (no logging; the CLI owns outcome lines) | `core/notify.py` |
    | Source types and their pipelines | `sources/<type>/source.py`, `sources/<type>/pipelines/` |
    | CLI and logging | `cli.py` |
 
@@ -50,6 +53,8 @@ Dependency direction is `cli` → `sources` → `core`. Source types never impor
 | A new cursor or window kind | A `Cursor` / `Window` / `Backfill` subclass in `core/` | `if kind == ...` chains |
 | A new write behaviour (hard deletes, scd2 options) | A field on, or class beside, `Merge`/`Append`/`Replace` in `core/write.py` | Hints applied in adapters |
 | A new alert channel (Slack, Teams) | A class with `send(event: RunEvent)`, passed via `Pipeline(notifiers=...)` | Channel checks in `Run` |
+| A new monitoring destination (HTTP collector, queue, warehouse) | A `Sink` subclass declaring `schemes` and implementing `from_uri`/`write` | Branching on destinations in `Monitor` |
+| A new monitored metric | A field on the relevant record in `core/monitoring/records.py` (schema derives from it), filled by `Monitor` | A second schema definition, or log lines parsed later |
 | A new run type | Subclass `Run`; set class attributes, implement `units` (and `check`) | Copy `__call__` |
 | Code two source types both need | `core/`, deliberately, with a test, once a second consumer exists | Copy it into both packages |
 
@@ -102,9 +107,12 @@ Inheritance rules:
   line length 100.
 - Names say what a thing is in domain terms.
 - Docstrings explain why and what a caller must know. Comments only for non-obvious reasons.
-- Raise the narrowest `RunError` subclass so the CLI returns the right exit code. Never swallow an
-  exception or downgrade it to a log line. The one exception is notifier failures, which must not
-  mask a run's outcome.
+- Text that leaves the process (logs, monitoring, notifiers) goes through `redact`; never put a
+  credential or connection string into an exception message yourself.
+- Raise the narrowest `RunError` subclass (with `step=` where known) so the CLI returns the right
+  exit code and the failure line says where it happened. Never swallow an exception or downgrade
+  it to a log line. The exceptions are notifier and monitoring-sink failures, which must not mask
+  a run's outcome.
 - `__init__.py` files only re-export the public API (`pipelines/__init__.py` stays empty so
   discovery can walk it).
 - Change only what the task needs. No drive-by refactors, renames, or formatting churn outside

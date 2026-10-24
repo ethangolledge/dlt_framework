@@ -1,7 +1,5 @@
 """Files in S3, GCS, Azure, or a local folder through dlt's ``filesystem`` source."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 

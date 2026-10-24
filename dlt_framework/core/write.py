@@ -1,7 +1,5 @@
 """Write modes: how extracted rows are written to the destination table."""
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Literal

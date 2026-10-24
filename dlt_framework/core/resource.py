@@ -1,7 +1,5 @@
 """A resource: one stream of rows from a source into one destination table."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 

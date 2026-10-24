@@ -44,7 +44,7 @@ Read only what the task needs, but always read the file for the area you are cha
 | `references/running-pipelines.md` | Naming, running, backfilling, bootstrapping a table, full-load guards. |
 | `references/engineering-standards.md` | Any code change: where each concept lives, extension points, OOP rules, quality and test bar. |
 | `references/dlt-docs-index.md` | Any dlt API or behaviour question; maps topics to the vendored docs. |
-| `README.md` | Public usage, commands, exit codes, deployment contract. |
+| `README.md` | Public usage, commands, exit codes, failure log format, monitoring frames and sinks, deployment contract. |
 | `dlt_framework/sources/rest/pipelines/dummyjson.py`, `tests/conftest.py`, `tests/test_sources.py` | A working definition, test fixtures, and per-source upstream-binding tests. |
 
 ## Workflow: adding a pipeline or table
@@ -70,7 +70,7 @@ Read only what the task needs, but always read the file for the area you are cha
 4. **Test.** Add or extend a binding test that captures the outbound request or SQL and asserts
    the cursor start, plus each backfill window's bounds (G2). Behaviour changes need DuckDB
    integration tests.
-5. **Verify offline**: `dlt-framework check NAME`, then the quality gates.
+5. **Verify offline**: `pipeline check NAME`, then the quality gates.
 
 ## Workflow: running or backfilling
 
@@ -88,7 +88,7 @@ Read the module and its tests first. Use the placement table in
 ## Quality gates
 
 ```bash
-uv run dlt-framework check NAME
+pipeline check NAME
 uv run ruff check dlt_framework tests
 uv run ruff format --check dlt_framework tests
 uv run lint-imports

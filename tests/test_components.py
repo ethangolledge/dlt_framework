@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -31,7 +31,7 @@ from dlt_framework.sources.filesystem import Files, FilesystemSource
 from dlt_framework.sources.rest import RestApiSource
 from dlt_framework.sources.sql import SqlSource
 
-UTC = timezone.utc
+UTC = UTC
 INSTANT = datetime(2026, 3, 1, 12, 30, tzinfo=UTC)
 
 
@@ -86,6 +86,10 @@ def test_value_and_row_backfills() -> None:
     ]
     rows = RowBackfill(size=100).windows(None, "200")
     assert [next(rows), next(rows)] == [RowWindow(200, 100), RowWindow(300, 100)]
+    with pytest.raises(ConfigurationError, match="not an integer"):
+        next(ValueBackfill(start=0, every=10).windows(cursor, "2026-01-01"))
+    with pytest.raises(ConfigurationError, match="not an integer"):
+        next(RowBackfill(size=100).windows(None, "ten"))
     assert RowWindow(0, 100).is_last(99) and not RowWindow(0, 100).is_last(100)
 
 

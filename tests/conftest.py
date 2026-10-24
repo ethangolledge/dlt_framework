@@ -2,6 +2,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import duckdb
+import polars as pl
 import pytest
 
 from dlt_framework.core import (
@@ -14,19 +15,36 @@ from dlt_framework.core import (
     ValueBackfill,
     ValueCursor,
 )
+from dlt_framework.core.monitoring import ParquetSink
 from dlt_framework.core.windows import RowWindow
 from dlt_framework.sources.custom import CustomSource
 
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch) -> Iterator[None]:
-    """Every test gets its own dlt working dir, DuckDB file, and empty pipeline registry."""
+    """Every test gets its own dlt working dir, DuckDB file, monitoring folder, and registry."""
     monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
     monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "warehouse.duckdb"))
+    monkeypatch.setenv("MONITORING__URI", f"file://{tmp_path / 'monitoring'}")
     monkeypatch.setenv("RUNTIME__LOG_LEVEL", "WARNING")
     Pipeline.registry.clear()
     yield
     Pipeline.registry.clear()
+
+
+@pytest.fixture
+def sink(tmp_path) -> ParquetSink:
+    return ParquetSink(str(tmp_path / "monitoring"))
+
+
+@pytest.fixture
+def frames(tmp_path) -> Callable[[str], pl.DataFrame]:
+    """Read back a monitoring frame (``runs``, ``loads``, ``samples``) written by a test."""
+
+    def read(name: str) -> pl.DataFrame:
+        return pl.read_parquet(tmp_path / "monitoring" / name / "*.parquet").sort("at")
+
+    return read
 
 
 class Upstream:

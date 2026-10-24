@@ -1,7 +1,5 @@
 """Pipeline definitions and the registry that makes their names unique."""
 
-from __future__ import annotations
-
 import importlib
 import pkgutil
 from dataclasses import dataclass, field
@@ -10,7 +8,7 @@ from typing import Any, ClassVar
 from dlt.common.schema.typing import TSchemaContractDict
 
 from dlt_framework.core.errors import DefinitionError, require_identifier
-from dlt_framework.core.notify import LogNotifier, Notifier
+from dlt_framework.core.notify import Notifier
 from dlt_framework.core.retry import Retry
 from dlt_framework.core.source import Source
 from dlt_framework.core.target import Target
@@ -38,9 +36,9 @@ class Pipeline:
     target: Target
     schema_contract: TSchemaContractDict
     retry: Retry = field(default_factory=Retry)
-    notifiers: tuple[Notifier, ...] = (LogNotifier(),)
+    notifiers: tuple[Notifier, ...] = ()
 
-    registry: ClassVar[dict[str, Pipeline]] = {}
+    registry: ClassVar[dict[str, "Pipeline"]] = {}
 
     def __post_init__(self) -> None:
         require_identifier(self.name, "Pipeline name")
@@ -51,7 +49,7 @@ class Pipeline:
         self.registry[self.name] = self
 
     @classmethod
-    def get(cls, name: str) -> Pipeline:
+    def get(cls, name: str) -> "Pipeline":
         try:
             return cls.registry[name]
         except KeyError:

@@ -7,8 +7,6 @@ Usage:
     uv run python .claude/skills/dlt-pipelines/scripts/sync_dlt_docs.py --version 1.29.1
 """
 
-from __future__ import annotations
-
 import argparse
 import re
 import shutil
@@ -19,6 +17,8 @@ from pathlib import Path
 REPOSITORY = "https://github.com/dlt-hub/dlt.git"
 DOCS_ROOT = Path("docs/website/docs")
 OUTPUT = Path(__file__).resolve().parents[1] / "dlt-docs"
+# Apache-2.0 section 4(b): modified files must say they were changed.
+MODIFIED = "MDX imports and components removed; DLT_SNIPPET placeholders replaced by their code"
 
 # Paths relative to DOCS_ROOT. Directories are copied recursively (Markdown only).
 INCLUDED = (
@@ -89,7 +89,10 @@ def main() -> None:
             for page in sorted(source.rglob("*.md")) if source.is_dir() else [source]:
                 _write_page(page, docs)
         shutil.copyfile(Path(checkout) / "LICENSE.txt", OUTPUT / "LICENSE.txt")
-    (OUTPUT / "VERSION").write_text(f"dlt {args.version}\ncommit {commit}\nsource {REPOSITORY}\n")
+    (OUTPUT / "VERSION").write_text(
+        f"dlt {args.version}\ncommit {commit}\nsource {REPOSITORY}\n"
+        f"licence Apache-2.0 (LICENSE.txt)\nmodified {MODIFIED}\n"
+    )
     print(f"Vendored dlt {args.version} documentation into {OUTPUT}")
 
 

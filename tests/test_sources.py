@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -35,7 +35,7 @@ from dlt_framework.sources.filesystem import Files, FilesystemSource
 from dlt_framework.sources.rest import RestApiSource
 from dlt_framework.sources.sql import SqlSource
 
-UTC = timezone.utc
+UTC = UTC
 MERGE = Merge(primary_key=("id",), strategy="delete-insert")
 
 
@@ -108,26 +108,26 @@ TIMED = Resource(
 )
 
 
-def test_rest_run_sends_start_only() -> None:
+def test_rest_run_sends_start_only(sink) -> None:
     definition, adapter = rest_pipeline(TIMED)
-    IncrementalRun(definition)()
+    IncrementalRun(definition, sink)()
     assert adapter.queries == [{"updated_since": ["2026-02-01T00:00:00Z"]}]
 
 
-def test_rest_time_backfill_sends_both_bounds() -> None:
+def test_rest_time_backfill_sends_both_bounds(sink) -> None:
     definition, adapter = rest_pipeline(TIMED)
-    BackfillRun(definition)()
+    BackfillRun(definition, sink)()
     assert adapter.queries == [
         {"updated_since": ["2026-01-01T00:00:00Z"], "updated_before": ["2026-02-01T00:00:00Z"]}
     ]
 
 
-def test_rest_row_backfill_sends_offset_and_limit() -> None:
+def test_rest_row_backfill_sends_offset_and_limit(sink) -> None:
     paged = Resource(
         name="orders", write=MERGE, cursor=None, empty="warn", backfill=RowBackfill(size=2)
     )
     definition, adapter = rest_pipeline(paged, total=3)
-    assert BackfillRun(definition)()["orders"] == 3
+    assert BackfillRun(definition, sink)()["orders"] == 3
     assert adapter.queries == [{"skip": ["0"], "take": ["2"]}, {"skip": ["2"], "take": ["2"]}]
 
 
@@ -153,7 +153,7 @@ def sql_pipeline(resource: Resource, statements: list[str], **config) -> Pipelin
     return define("erp", SqlSource(name="erp", resources={resource: options}))
 
 
-def test_sql_value_backfill_is_a_bounded_where_clause(erp, query) -> None:
+def test_sql_value_backfill_is_a_bounded_where_clause(erp, query, sink) -> None:
     resource = Resource(
         name="orders",
         write=MERGE,
@@ -161,23 +161,25 @@ def test_sql_value_backfill_is_a_bounded_where_clause(erp, query) -> None:
         empty="warn",
         backfill=ValueBackfill(start=10, every=20),
     )
-    assert BackfillRun(sql_pipeline(resource, erp))()["orders"] == 3
+    assert BackfillRun(sql_pipeline(resource, erp), sink)()["orders"] == 3
     assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(1,), (2,), (3,)]
     select = next(s for s in erp if 'FROM "Orders"' in s or "FROM Orders" in s)
     assert '"Orders".version >= ?' in select and '"Orders".version < ?' in select
 
 
-def test_sql_row_backfill_orders_and_pages(erp, query) -> None:
+def test_sql_row_backfill_orders_and_pages(erp, query, sink) -> None:
     resource = Resource(
         name="orders", write=MERGE, cursor=None, empty="warn", backfill=RowBackfill(size=2)
     )
-    assert BackfillRun(sql_pipeline(resource, erp, order_by=["id"]))()["orders"] == 5
+    assert BackfillRun(sql_pipeline(resource, erp, order_by=["id"]), sink)()["orders"] == 5
     selects = [s for s in erp if "LIMIT" in s]
     assert len(selects) == 3 and all('ORDER BY "Orders".id' in s and "OFFSET" in s for s in selects)
     assert query("SELECT count(*) FROM raw_shop.orders") == [(5,)]
 
 
-def test_filesystem_loads_new_files_and_backfills_by_modification_date(tmp_path, query) -> None:
+def test_filesystem_loads_new_files_and_backfills_by_modification_date(
+    tmp_path, query, sink
+) -> None:
     folder = tmp_path / "in"
     folder.mkdir()
     (folder / "old.csv").write_text("id\n1\n")
@@ -196,17 +198,17 @@ def test_filesystem_loads_new_files_and_backfills_by_modification_date(tmp_path,
     files = Files(bucket_url=folder.as_uri(), file_glob="*.csv", reader="csv")
     definition = define("files", FilesystemSource(name="files", resources={resource: files}))
 
-    assert IncrementalRun(definition)()["orders"] == 1
-    assert BackfillRun(definition)()["orders"] == 1
+    assert IncrementalRun(definition, sink)()["orders"] == 1
+    assert BackfillRun(definition, sink)()["orders"] == 1
     assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(1,), (2,)]
 
     # The cursor lives on the listing resource; the lost-state guard must still find it.
-    IncrementalRun(definition)()
+    IncrementalRun(definition, sink)()
     renamed = define("files_renamed", FilesystemSource(name="files", resources={resource: files}))
     with pytest.raises(GuardError):
-        IncrementalRun(renamed)()
+        IncrementalRun(renamed, sink)()
 
 
-def test_append_resource_without_cursor_loads_everything(erp, query) -> None:
+def test_append_resource_without_cursor_loads_everything(erp, query, sink) -> None:
     resource = Resource(name="orders", write=Append(), cursor=None, empty="fail")
-    assert IncrementalRun(sql_pipeline(resource, erp))()["orders"] == 5
+    assert IncrementalRun(sql_pipeline(resource, erp), sink)()["orders"] == 5

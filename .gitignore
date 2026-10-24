@@ -5,9 +5,8 @@ __pycache__/
 *.duckdb
 .dlt/*
 !.dlt/config.toml
-build/
+!.dlt/secrets.toml.example
 dist/
-*.egg-info/
 .pytest_cache/
 test_data/*
 .coverage

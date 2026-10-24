@@ -4,8 +4,6 @@ Time and value backfills end where the resource's cursor starts, so history and 
 meet exactly once at ``cursor.start``. Row backfills cover sources with no usable cursor.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from calendar import monthrange
 from collections.abc import Iterator
@@ -30,6 +28,14 @@ class Backfill(ABC):
     def check(self, cursor: Cursor | None) -> None:
         if self.cursor is not None and not isinstance(cursor, self.cursor):
             raise DefinitionError(f"{type(self).__name__} needs a {self.cursor.__name__}")
+
+    @staticmethod
+    def _position(text: str) -> int:
+        """A ``--from`` value for value and row backfills."""
+        try:
+            return int(text)
+        except ValueError as error:
+            raise ConfigurationError(f"--from {text!r} is not an integer") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +106,9 @@ class ValueBackfill(Backfill):
 
     def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
         assert isinstance(cursor, ValueCursor)
-        for start in range(int(resume) if resume else self.start, cursor.start, self.every):
+        for start in range(
+            self._position(resume) if resume else self.start, cursor.start, self.every
+        ):
             yield ValueWindow(start, min(start + self.every, cursor.start))
 
 
@@ -114,5 +122,5 @@ class RowBackfill(Backfill):
     size: int
 
     def windows(self, cursor: Cursor | None, resume: str | None) -> Iterator[Window]:
-        for offset in count(int(resume) if resume else 0, self.size):
+        for offset in count(self._position(resume) if resume else 0, self.size):
             yield RowWindow(offset, self.size)
