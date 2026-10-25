@@ -45,6 +45,14 @@ class Table(Locator):
     page continue its cells, so wrapped text is joined. Lines before a page's first row (headers)
     are skipped. ``ignore`` drops lines and ``ends`` ends the table; both match the whole
     printed line, including words outside the columns.
+
+    ``header`` matches the lines of the table header repeated on each page: they are dropped, and
+    a row (or its note) cut by a page break continues on the next page. Without it, lines before
+    a page's first row are skipped, since they cannot be told from a header.
+
+    ``notes`` matches the first line of a note printed across the table under its row, such as a
+    comment or a description: from there to the next row, lines land whole, one per line, in the
+    row's ``notes`` cell instead of being split into columns.
     """
 
     columns: Mapping[str, float]
@@ -52,18 +60,22 @@ class Table(Locator):
     starts: str
     ends: str | None = None
     ignore: str | None = None
+    header: str | None = None
+    notes: str | None = None
 
     def find(self, document: Document) -> list[dict[str, str]]:
         names = sorted(self.columns, key=self.columns.__getitem__)
         edges = [self.columns[name] for name in names]
         rows: list[dict[str, str]] = []
+        row: dict[str, str] | None = None
+        noting = False  # inside the current row's note
         for page in document.pages:
-            row: dict[str, str] | None = None
+            started = False  # a row has started on this page
             for words in _lines(page):
                 text = " ".join(word.text for word in words)
                 if self.ends and re.search(self.ends, text):
                     return self._found(rows)
-                if self.ignore and re.search(self.ignore, text):
+                if any(p and re.search(p, text) for p in (self.ignore, self.header)):
                     continue
                 cells = dict.fromkeys(names, "")
                 for word in words:
@@ -71,9 +83,15 @@ class Table(Locator):
                         name = names[column - 1]
                         cells[name] = f"{cells[name]} {word.text}".lstrip()
                 if re.fullmatch(self.starts, cells[self.key]):
-                    row = cells
+                    row = cells | ({"notes": ""} if self.notes else {})
                     rows.append(row)
-                elif row is not None:
+                    started, noting = True, False
+                elif row is None or not (started or self.header):
+                    continue
+                elif self.notes and (noting or re.search(self.notes, text)):
+                    row["notes"] = f"{row['notes']}\n{text}".lstrip("\n")
+                    noting = True
+                else:
                     for name, value in cells.items():
                         row[name] = f"{row[name]} {value}".strip()
         return self._found(rows)

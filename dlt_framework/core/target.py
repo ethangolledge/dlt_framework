@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 import dlt
 from dlt.common.destination import Destination
 
+from dlt_framework.core.config import resolve
 from dlt_framework.core.errors import ConfigurationError, require_identifier
 
 
@@ -85,12 +86,22 @@ class DuckDb(Target):
         return self._file().loading
 
     def _file(self) -> "_DuckDbFile":
-        """This process's handle on the configured file, opened on first use."""
+        """This process's handle on the configured file, opened on first use.
+
+        DuckDB's own settings (``memory_limit``, ``threads``) are dlt's
+        ``destination.duckdb.credentials.global_config``, which dlt applies only to connections
+        it opens itself. They are set here as dlt sets them, ``SET GLOBAL`` once the file is open:
+        every connection to the file in this process shares them, and DuckDB refuses a second
+        connection opened with a different connect-time config. Without a ``memory_limit`` DuckDB
+        takes up to 80% of the machine's memory.
+        """
         import duckdb  # the duckdb extra
+        from dlt.destinations.impl.duckdb.configuration import DuckDbCredentials
 
         configured: Any = dlt.secrets.get("destination.duckdb.credentials")
         if not configured:
             raise ConfigurationError("Set destination.duckdb.credentials to the DuckDB file")
+        settings = resolve(DuckDbCredentials(), "destination", "duckdb", "credentials")
         path = Path(str(configured).removeprefix("duckdb:///")).resolve()
         if path.stem.casefold() == self.dataset.casefold():
             raise ConfigurationError(
@@ -99,6 +110,8 @@ class DuckDb(Target):
         with _DUCKDB_LOCK:
             if path not in _DUCKDB:
                 connection = duckdb.connect(str(path))
+                for key, value in (settings.global_config or {}).items():
+                    connection.execute(f"SET GLOBAL {key} = $value", {"value": value})
                 atexit.register(connection.close)
                 _DUCKDB[path] = _DuckDbFile(connection, threading.Lock())
             return _DUCKDB[path]

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 from urllib.parse import urlparse
 
+from dlt.common.exceptions import TerminalException
 from dlt.extract.incremental import Incremental
 from dlt.extract.resource import DltResource
 from scrapling.spiders import Request, Response, Spider
@@ -38,8 +39,14 @@ STATED = ("robots_txt_obey", "failed_requests")
 _BUFFER = 1000  # items held between the crawl and dlt before the crawl waits
 
 
-class ScrapeError(RuntimeError):
-    """Requests failed during a crawl whose spider states ``failed_requests = "raise"``."""
+class ScrapeError(RuntimeError, TerminalException):
+    """Requests failed during a crawl whose spider states ``failed_requests = "raise"``, or the
+    site rate-limited it.
+
+    Terminal: Scrapling has already retried each failed request, and re-running the whole crawl
+    would re-request every page, multiplying the load on a site that may be limiting us. The run
+    fails, nothing is committed, and the next run resumes from the stored cursor.
+    """
 
 
 class ScrapeSpider(Spider):
@@ -72,24 +79,28 @@ class ScrapeSpider(Spider):
         super().__init__()
         self.incremental, self.window = incremental, window
         self.failures: list[str] = []
+        self.rate_limited = False
         self._blocked: Counter[str] = Counter()
         for handler in [h for h in self.logger.handlers if type(h) is logging.StreamHandler]:
             self.logger.removeHandler(handler)
         self.logger.propagate = True
 
-    async def save(self, response: Response) -> str:
+    async def save(self, response: Response, name: str | None = None) -> str:
         """Store a downloaded document under ``documents`` and return its URL.
 
-        Named by content hash, so a document saved again while still stored is not rewritten
-        (nor re-extracted). The write runs off the event loop, so a slow bucket does not stall
-        the crawl.
+        Named ``name`` (plus the URL's suffix) when the upstream has a stable id for it, so a
+        spider can check ``buckets.exists`` before downloading it again; otherwise by content
+        hash. Either way a document saved again while still stored is not rewritten (nor
+        re-extracted). The write runs off the event loop, so a slow bucket does not stall the
+        crawl.
         """
         documents = getattr(self, "documents", None)
         if documents is None:
             raise DefinitionError(f"{type(self).__name__} saves documents: state `documents`")
         body = response.body
         suffix = posixpath.splitext(urlparse(response.url).path)[1]
-        url = f"{documents.rstrip('/')}/{hashlib.sha256(body).hexdigest()[:16]}{suffix}"
+        stem = name or hashlib.sha256(body).hexdigest()[:16]
+        url = f"{documents.rstrip('/')}/{stem}{suffix}"
         if not await asyncio.to_thread(buckets.exists, url):
             await asyncio.to_thread(buckets.write, url, body)
         return url
@@ -98,8 +109,13 @@ class ScrapeSpider(Spider):
         self.failures.append(f"{request.url}: {type(error).__name__}: {error}")
 
     async def is_blocked(self, response: Response) -> bool:
+        if response.status == 429 and not self.rate_limited:
+            # Rate limited: stop now. Retrying into the limit is what extends a site's block.
+            self.rate_limited = True
+            self.failures.append(f"{response.url}: rate limited (HTTP 429); the crawl stopped")
+            self.pause()
         blocked = await super().is_blocked(response)
-        if blocked:
+        if blocked and not self.rate_limited:
             url = (response.request or response).url
             self._blocked[url] += 1
             if self._blocked[url] > self.max_blocked_retries:
@@ -120,7 +136,7 @@ class ScrapeSpider(Spider):
         if not self.failures:
             return
         summary = f"{self.name}: {len(self.failures)} failed requests, first: {self.failures[0]}"
-        if self.failed_requests == "raise":
+        if self.failed_requests == "raise" or self.rate_limited:  # a cut-short crawl never lands
             raise ScrapeError(summary)
         LOGGER.warning("%s; the rest were loaded", summary)
 

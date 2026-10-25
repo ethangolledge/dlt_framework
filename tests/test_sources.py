@@ -1,5 +1,6 @@
 """Each source type proves its cursors and windows reach the upstream request (guard G2)."""
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -34,6 +35,13 @@ from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.sources.filesystem import Csv, Files, FilesystemSource
 from dlt_framework.sources.rest import RestApiSource
 from dlt_framework.sources.sql import ConnectorX, PyArrow, SqlAlchemy, SqlSource
+
+
+def needs(*modules: str) -> pytest.MarkDecorator:
+    """Skip unless ``modules`` (an extra's libraries) are installed."""
+    missing = [module for module in modules if importlib.util.find_spec(module) is None]
+    return pytest.mark.skipif(bool(missing), reason=f"needs {missing}")
+
 
 UTC = UTC
 MERGE = Merge(primary_key=("id",), strategy="delete-insert")
@@ -236,7 +244,10 @@ def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, que
     assert increments["cursor_last_value"].to_list() == ["1006"]  # readable, not b'\\x00...'
 
 
-BACKENDS = [SqlAlchemy(), PyArrow(), ConnectorX()]
+BACKENDS = [
+    pytest.param(backend, marks=needs(*backend.requires()))
+    for backend in (SqlAlchemy(), PyArrow(), ConnectorX())
+]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -267,3 +278,28 @@ def test_connectorx_refuses_a_timezone_aware_cursor_it_would_compare_wrongly() -
     )
     with pytest.raises(DefinitionError):
         SqlSource(name="erp", backend=ConnectorX(), resources={resource: {}})
+
+
+def test_csv_resources_extract_in_parallel_without_crashing(tmp_path, query) -> None:
+    """Each Csv read has its own DuckDB connection: on the shared default one, parallel
+    resources crashed the process (a segfault)."""
+    resources = {}
+    for table in ("north", "south", "east", "west"):
+        folder = tmp_path / table
+        folder.mkdir()
+        for part in range(3):
+            rows = "\n".join(f"{part * 1000 + i}\t{table}" for i in range(1000))
+            (folder / f"{part}.tsv").write_text(f"id\tregion\n{rows}\n")
+        resource = Resource(name=table, write=Append(), cursor=None, empty="fail")
+        options = {"use_pyarrow": True, "all_varchar": True, "delimiter": "\t", "header": True}
+        resources[resource] = Files(
+            bucket_url=folder.as_uri(), file_glob="*.tsv", reader=Csv(options=options)
+        )
+    definition = define("regions", FilesystemSource(name="regions", resources=resources))
+    assert IncrementalRun(definition)() == {
+        "north": 3000,
+        "south": 3000,
+        "east": 3000,
+        "west": 3000,
+    }
+    assert query("SELECT count(DISTINCT id), min(id) FROM raw_shop.east") == [(3000, "0")]

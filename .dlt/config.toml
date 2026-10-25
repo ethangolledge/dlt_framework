@@ -63,7 +63,10 @@ workers = 3
 start_method = "spawn"
 
 [load]
-workers = 5
+# One job at a time: every job into a DuckDB file runs on its one connection, where each statement
+# already uses `threads` cores, so parallel jobs add memory, not speed (five large merges at once
+# were OOM-killed at ~7.4 GB). Raise it for Postgres.
+workers = 1
 raise_on_failed_jobs = true
 delete_completed_jobs = true
 truncate_staging_dataset = true
@@ -71,6 +74,15 @@ start_new_jobs_on_signal = true
 
 [pipelines]
 restore_from_destination = true
+
+[destination.duckdb.credentials.global_config]
+# DuckDB's own settings, set as the file is opened (the file itself is a secret). Without a
+# memory_limit DuckDB takes up to 80% of RAM; past it, what can spill goes to `<file>.tmp` beside
+# the file. A merge dedups its staging rows with a window function, whose memory grows with
+# threads. Raw tables need no insertion order.
+memory_limit = "5GB"
+threads = 2
+preserve_insertion_order = false
 
 [destination]
 # Replace loads into staging, then swaps inside one transaction: no empty-table window.

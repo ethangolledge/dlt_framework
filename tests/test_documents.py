@@ -29,6 +29,7 @@ from dlt_framework.sources.filesystem import Files, FilesystemSource
 from dlt_framework.sources.filesystem.documents import (
     Archive,
     Delete,
+    Document,
     Documents,
     Keep,
     Model,
@@ -323,3 +324,13 @@ def test_a_failed_run_keeps_its_files_while_another_sharing_its_reader_commits(t
     assert main(["run", "good", "bad"]) == GuardError.exit_code
     assert list(good.iterdir()) == []
     assert [path.name for path in bad.iterdir()] == ["acme.pdf"]
+
+
+def test_a_table_keeps_a_note_under_its_row_whole() -> None:
+    note = "C : made in Sheffield and delivered by rail freight"  # long enough to cross columns
+    document = Document.read(pdf([], [["bolts", "10.50"], [note, ""], ["nuts", "20.00"]]), None)
+    table = Table(columns={"item": 50, "amount": 200}, key="amount", starts=r"[\d.]+", notes="^C :")
+    assert table.find(document) == [
+        {"item": "bolts", "amount": "10.50", "notes": note},
+        {"item": "nuts", "amount": "20.00", "notes": ""},
+    ]

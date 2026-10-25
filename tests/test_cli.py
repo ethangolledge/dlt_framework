@@ -1,8 +1,15 @@
 import pytest
+from dlt.common.configuration.exceptions import ConfigurationValueError
 from dlt.common.exceptions import TerminalValueError
+from dlt.destinations.exceptions import DestinationTransientException
 
 from dlt_framework.cli import main
-from dlt_framework.core.errors import TerminalRunError, TransientRunError
+from dlt_framework.core.errors import (
+    ConfigurationError,
+    ResourceExhaustedError,
+    TerminalRunError,
+    TransientRunError,
+)
 from dlt_framework.core.monitoring.coverage import Coverage
 from dlt_framework.core.pipeline import Pipeline
 from dlt_framework.core.retry import Retry
@@ -82,7 +89,30 @@ def test_retry_classifies_terminal_and_transient_errors() -> None:
         retry("load", fail(PermissionError("denied")))
     with pytest.raises(TerminalRunError):
         retry("sync", fail(ModuleNotFoundError("No module named 'duckdb'", name="duckdb")))
+    with pytest.raises(TerminalRunError):  # as an async crawl raises its errors
+        retry("extract", fail(ExceptionGroup("crawl", [TerminalValueError("refused")])))
+    with pytest.raises(ConfigurationError):  # a secret read at run time, missing
+        retry("extract", fail(ExceptionGroup("crawl", [ConfigurationValueError("no user_agent")])))
     assert retry("load", lambda: 42) == 42
+
+
+def test_a_database_out_of_memory_is_never_retried() -> None:
+    """DuckDB at its memory_limit, wrapped as dlt wraps it (transient): the same merge at the
+    same limit fails again, so it fails at once with exit 5."""
+    duckdb = pytest.importorskip("duckdb")
+    retry = Retry(attempts=3, initial_wait_s=0, max_wait_s=0, give_up_after_s=60)
+    calls = []
+
+    def merge() -> None:
+        calls.append(1)
+        try:
+            raise duckdb.OutOfMemoryException("Out of Memory Error: failed to pin block")
+        except duckdb.OutOfMemoryException as error:
+            raise DestinationTransientException("merge failed") from error
+
+    with pytest.raises(ResourceExhaustedError) as failure:
+        retry("load", merge)
+    assert (len(calls), failure.value.exit_code) == (1, 5)
 
 
 def test_retry_gives_up_after_its_time_limit() -> None:
@@ -155,7 +185,9 @@ def test_a_broken_import_inside_the_framework_is_a_bug(write_package) -> None:
 
 
 PARALLEL = """
+from dlt.common.configuration.exceptions import ConfigurationValueError
 from dlt.common.exceptions import TerminalValueError
+from dlt.destinations.exceptions import DestinationTransientException
 
 from dlt_framework.core import FREEZE_DATA_TYPES, Append, Pipeline, Resource, DuckDb
 from dlt_framework.sources.custom import CustomSource

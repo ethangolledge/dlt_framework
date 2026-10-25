@@ -13,7 +13,7 @@ from dlt_framework.core import (
     RowBackfill,
     ValueCursor,
 )
-from dlt_framework.core.errors import TransientRunError
+from dlt_framework.core.errors import TerminalRunError
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.sources.scrape import ScrapeSource, ScrapeSpider
 
@@ -79,7 +79,7 @@ def test_failed_requests_fail_the_extract_unless_stated_otherwise(site, query) -
     listing(site, [3, 2, 1])
     site.pages["/page/1"] = (200, site.pages["/page/1"][1] + '<a class="next" href="/gone">x</a>')
     site.pages["/gone"] = (503, "down")
-    with pytest.raises(TransientRunError):
+    with pytest.raises(TerminalRunError):
         IncrementalRun(pipeline(spider(site)))()
 
     Pipeline.registry.clear()
@@ -91,14 +91,14 @@ def test_failed_requests_fail_the_extract_unless_stated_otherwise(site, query) -
 def test_unreachable_pages_are_failures_not_silence(site, robots) -> None:
     """Scrapling skips a request whose robots.txt cannot be fetched without calling on_error."""
     unreachable = spider(site, start_urls=["http://127.0.0.1:9/page/1"], robots_txt_obey=robots)
-    with pytest.raises(TransientRunError):
+    with pytest.raises(TerminalRunError):
         IncrementalRun(pipeline(unreachable))()
 
 
 def test_pages_disallowed_by_robots_txt_are_reported(site) -> None:
     listing(site, [6, 5, 4, 3, 2, 1])
     site.pages["/robots.txt"] = (200, "User-agent: *\nDisallow: /page/2")
-    with pytest.raises(TransientRunError):
+    with pytest.raises(TerminalRunError):
         IncrementalRun(pipeline(spider(site)))()
 
 
@@ -139,3 +139,12 @@ def test_saved_documents_are_stored_once_by_content(site, tmp_path) -> None:
     assert IncrementalRun(definition)() == {"posts": 1}
     assert IncrementalRun(definition)() == {"posts": 1}
     assert [path.read_bytes() for path in landing.iterdir()] == [b"%PDF-1.4 report"]
+
+
+def test_a_rate_limit_stops_the_crawl_at_once_and_is_never_retried(site) -> None:
+    listing(site, list(range(9, 0, -1)))
+    site.pages["/page/2"] = (429, "Request Rate Threshold Exceeded")
+    with pytest.raises(TerminalRunError):  # never retried: retrying extends a site's block
+        IncrementalRun(pipeline(spider(site, failed_requests="warn")))()
+    assert site.paths().count("/page/2") == 1  # no request retried into the limit
+    assert "/page/3" not in site.paths()

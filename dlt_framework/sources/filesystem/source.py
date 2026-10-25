@@ -1,11 +1,15 @@
 """Files in S3, GCS, Azure, or a local folder through dlt's ``filesystem`` source."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import ClassVar
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
+import dlt
+from dlt.common.storages.fsspec_filesystem import FileItemDict
 from dlt.extract.resource import DltResource
-from dlt.sources.filesystem import filesystem, read_csv_duckdb, read_jsonl, read_parquet
+from dlt.sources.filesystem import filesystem, read_jsonl, read_parquet
+from dlt.sources.filesystem.helpers import fetch_arrow, fetch_json
 
 from dlt_framework.core import buckets
 from dlt_framework.core.cursor import TimeCursor
@@ -32,11 +36,33 @@ class Reader(ABC):
 
 @dataclass(frozen=True, slots=True)
 class Csv(Reader):
-    def transformer(self, extraction: Extraction) -> DltResource:
-        return read_csv_duckdb()
+    """CSV through DuckDB, on a connection of its own for each extract.
 
-    def requires(self) -> dict[str, str]:
-        return {"duckdb": "filesystem"}
+    dlt's ``read_csv_duckdb`` reads on DuckDB's shared default connection, which is not safe
+    across threads: resources extract in parallel, so two CSV resources crashed the process
+    (a segfault, with no log). ``options`` are ``use_pyarrow`` (Arrow batches, much faster for
+    large files), ``chunk_size`` (rows a batch, default 5,000), and DuckDB's Python CSV reader
+    options: ``all_varchar=True`` lands text instead of sniffed types, which can differ between
+    files and break a frozen schema; ``delimiter``, ``quotechar``, ``header``, ...
+    """
+
+    options: Mapping[str, Any] = field(default_factory=dict)
+
+    def transformer(self, extraction: Extraction) -> DltResource:
+        options = dict(self.options)
+        fetch = fetch_arrow if options.pop("use_pyarrow", False) else fetch_json
+        chunk_size = options.pop("chunk_size", 5000)
+
+        @dlt.transformer(name="read_csv")
+        def read_csv(items: Iterable[FileItemDict]) -> Iterator[Any]:
+            import duckdb  # the filesystem extra
+
+            with duckdb.connect() as connection:
+                for item in items:
+                    with item.open() as file:
+                        yield from fetch(connection.from_csv_auto(file, **options), chunk_size)
+
+        return read_csv
 
 
 @dataclass(frozen=True, slots=True)

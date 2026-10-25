@@ -16,7 +16,7 @@ from dlt_framework.core import Duration, RowBackfill, TimeBackfill, TimeCursor, 
 from dlt_framework.core.errors import (
     ConfigurationError,
     ResourceExhaustedError,
-    TransientRunError,
+    TerminalRunError,
     redact,
 )
 from dlt_framework.core.logs import _Handler
@@ -57,6 +57,7 @@ def test_frames_have_fixed_schemas_even_when_empty(record) -> None:
 
 
 def test_sinks_resolve_from_uri_and_round_trip(tmp_path) -> None:
+    pytest.importorskip("psycopg2")  # the postgres extra: resolving a Postgres URL loads it
     assert isinstance(Sink.resolve(f"file://{tmp_path}"), ParquetSink)
     assert isinstance(Sink.resolve("s3://bucket/monitoring"), ParquetSink)
     assert isinstance(Sink.resolve("postgresql+psycopg2://u:p@h/db"), DatabaseSink)
@@ -198,13 +199,13 @@ def test_backfill_records_one_load_per_window(make_pipeline, frames) -> None:
 
 
 def test_failure_records_where_and_why(make_pipeline, frames) -> None:
-    """dlt treats unknown errors as transient, so this exhausts retries (exit 4)."""
+    """An unknown error is not retried: it fails the run at once (exit 3)."""
 
     def broken(incremental, window):
         raise ValueError("upstream returned garbage")
         yield
 
-    with pytest.raises(TransientRunError) as raised:
+    with pytest.raises(TerminalRunError) as raised:
         IncrementalRun(make_pipeline({ORDERS: broken}))()
     assert (raised.value.step, raised.value.resource, raised.value.window) == (
         "extract",
@@ -213,8 +214,8 @@ def test_failure_records_where_and_why(make_pipeline, frames) -> None:
     )
     failed = frames("runs").filter(pl.col("event") == "failed").row(0, named=True)
     assert {
-        "exit_code": 4,
-        "error_type": "TransientRunError",
+        "exit_code": 3,
+        "error_type": "TerminalRunError",
         "error_step": "extract",
         "error_resource": "orders",
         "error_window": "increment",
@@ -325,7 +326,7 @@ def test_logs_and_monitoring_never_hold_url_secrets(make_pipeline, frames) -> No
         raise ValueError("401 for url: https://api.x.com/orders?api_key=hunter2")
         yield
 
-    with pytest.raises(TransientRunError) as raised:
+    with pytest.raises(TerminalRunError) as raised:
         IncrementalRun(make_pipeline({ORDERS: unauthorised}))()
     error = raised.value
     record = logging.makeLogRecord(

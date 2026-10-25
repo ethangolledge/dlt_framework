@@ -1,12 +1,13 @@
 import os
 
-import psycopg2
 import pytest
 from conftest import ORDERS, Upstream
 
 from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Postgres
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.sources.custom import CustomSource
+
+psycopg2 = pytest.importorskip("psycopg2")  # the postgres extra
 
 
 @pytest.mark.postgres

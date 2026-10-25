@@ -24,6 +24,7 @@ from dlt_framework.core import (
     UnixSeconds,
     ValueBackfill,
     ValueCursor,
+    buckets,
 )
 from dlt_framework.core.errors import ConfigurationError, DefinitionError
 from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow
@@ -189,3 +190,21 @@ def test_pipeline_names_are_unique_and_cannot_mimic_backfills() -> None:
 def test_rowversions_sort_like_their_integers() -> None:
     rendered = [RowVersion().render(value) for value in (1, 255, 256, 2**40)]
     assert rendered == sorted(rendered)
+
+
+def test_duckdb_settings_apply_to_every_connection_to_the_file(monkeypatch, query) -> None:
+    settings = '{"memory_limit": "1GB", "threads": 1}'
+    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS__GLOBAL_CONFIG", settings)
+    DuckDb(dataset="raw").credentials()  # opens the file
+    sql = "SELECT current_setting('memory_limit'), current_setting('threads')"
+    assert query(sql) == [("953.6 MiB", 1)]  # a plain second connection shares them
+
+
+def test_folders_are_configured_urls(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FOLDERS__LANDING", "data/landing")
+    monkeypatch.setenv("FOLDERS__ARCHIVE", "s3://bucket/archive/")
+    assert buckets.folder("landing") == (tmp_path / "data" / "landing").as_uri()
+    assert buckets.folder("archive") == "s3://bucket/archive"
+    with pytest.raises(ConfigurationError, match=r"folders\.missing"):
+        buckets.folder("missing")

@@ -148,11 +148,12 @@ def write_package(tmp_path, monkeypatch) -> Callable[[str, str, str], str]:
 @dataclass
 class Site:
     """A local web server: ``pages`` maps a path to ``(status, body)``; ``requests`` records
-    every ``(method, path, body)`` it received."""
+    every ``(method, path, body)`` it received, and ``headers`` each request's headers."""
 
     url: str = ""
     pages: dict[str, tuple[int, str]] = field(default_factory=dict)
     requests: list[tuple[str, str, bytes]] = field(default_factory=list)
+    headers: list[dict[str, str]] = field(default_factory=list)
 
     def paths(self, method: str = "GET") -> list[str]:
         return [path for verb, path, _ in self.requests if verb == method and path != "/robots.txt"]
@@ -172,6 +173,7 @@ def site() -> Iterator[Site]:
         def _reply(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             served.requests.append((self.command, self.path, body))
+            served.headers.append(dict(self.headers))
             status, text = served.pages.get(self.path, (404, "not found"))
             data = text.encode()
             self.send_response(status)

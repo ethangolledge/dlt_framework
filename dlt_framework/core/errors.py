@@ -87,13 +87,20 @@ def exit_code(error: BaseException) -> int:
 
 
 def causes(error: BaseException) -> Iterator[BaseException]:
-    """``error`` and everything it was raised from, outermost first."""
+    """``error`` and everything it was raised from, outermost first, including the errors an
+    exception group holds (async libraries such as Scrapling raise a group of them)."""
     seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         yield current
-        current = current.__cause__ or current.__context__
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if (raised_from := current.__cause__ or current.__context__) is not None:
+            pending.append(raised_from)
 
 
 def root_cause(error: BaseException) -> BaseException:

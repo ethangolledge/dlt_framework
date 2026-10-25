@@ -159,6 +159,15 @@ dlt's own performance settings live in the same file: `[extract] workers`,
 `[data_writer] file_max_items`, `[normalize]`, `[load]`, and `[runtime] request_*` for HTTP
 retries.
 
+- **DuckDB's own settings** (`memory_limit`, `threads`, `preserve_insertion_order`) go in
+  `[destination.duckdb.credentials.global_config]`, as dlt names them. They are set on the file
+  as it is opened, and every connection to it in the process shares them. Without a
+  `memory_limit`, DuckDB takes up to 80% of the machine's memory. Every load job into one file runs
+  on its one connection, so `[load] workers` above 1 adds memory there, not speed.
+- **Folders pipelines meet at** (a spider downloads into one, a `FilesystemSource` reads it) go
+  in `[folders]`, read with `buckets.folder("<name>")`: a bucket URL, or a local path relative to
+  the working directory.
+
 ### Swapping implementations
 
 Monitoring sinks and log formats are chosen from config by key. A new one is a
