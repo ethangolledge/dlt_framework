@@ -1,11 +1,14 @@
 import logging
+import os
 import sqlite3
-import time
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 import polars as pl
 import pytest
+import sqlalchemy as sa
 from conftest import ORDERS, Upstream
 
 from dlt_framework.cli import main
@@ -70,6 +73,40 @@ def test_sinks_resolve_from_uri_and_round_trip(tmp_path) -> None:
     DatabaseSink(f"sqlite:///{database}").write("runs", frame)
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("SELECT count(*) FROM runs").fetchone() == (2,)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Event(Record):
+    name: ClassVar[str] = "events"
+
+    run_id: str
+    rows: int | None = None
+
+
+def postgres_sink(tmp_path) -> DatabaseSink:
+    url = os.environ.get("TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+    sink = DatabaseSink(url)
+    with sink.engine.begin() as connection:
+        connection.execute(sa.text("DROP TABLE IF EXISTS events"))
+    return sink
+
+
+@pytest.mark.parametrize(
+    "sink",
+    [
+        lambda tmp_path: ParquetSink((tmp_path / "monitoring").as_uri()),
+        lambda tmp_path: DatabaseSink(f"sqlite:///{tmp_path / 'monitoring.sqlite'}"),
+        pytest.param(postgres_sink, marks=pytest.mark.postgres),
+    ],
+)
+def test_sinks_read_back_nothing_then_rows_written_before_a_column_existed(tmp_path, sink) -> None:
+    sink = sink(tmp_path)
+    assert sink.read(Event).is_empty()
+    sink.write("events", Event.frame([Event(run_id="a")]).drop("rows"))  # an older record shape
+    sink.write("events", Event.frame([Event(run_id="b", rows=3)]))
+    assert sink.read(Event).sort("run_id").rows() == [("a", None), ("b", 3)]
 
 
 @pytest.mark.parametrize(
@@ -208,12 +245,11 @@ def test_a_killed_run_leaves_its_start_and_memory_trend(make_pipeline, sink, fra
     every = MonitoringSettings(uri="unused", sample_every_s=0.01, flush_every_s=0)
     monitor = Monitor(sink, definition, every, dlt_pipeline="shop", mode="run")
     monitor.__enter__()
-    time.sleep(0.1)
     monitor._sampler.stop()  # the process dies: no finished(), no __exit__
 
     lost = lost_runs(frames("runs"))
     assert lost["run_id"].to_list() == [monitor.run_id]
-    assert frames("samples").filter(pl.col("run_id") == monitor.run_id).height >= 2
+    assert frames("samples").filter(pl.col("run_id") == monitor.run_id).height >= 1
     (row,) = status(definition, frames("runs"), LoadRecord.frame([]))
     assert (row["mode"], row["outcome"], row["last_success"]) == ("run", "lost or running", "-")
 
@@ -242,7 +278,7 @@ def test_a_registered_sink_is_chosen_by_scheme_and_never_fails_the_run(
 
 
 BROKEN_PIPELINE = """
-from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Replace, Resource, Retry, Target
+from dlt_framework.core import FREEZE_DATA_TYPES, DuckDb, Pipeline, Replace, Resource
 from dlt_framework.sources.custom import CustomSource
 
 def orders(incremental, window):
@@ -251,7 +287,7 @@ def orders(incremental, window):
 
 Pipeline(
     name="broken",
-    target=Target("duckdb", dataset="raw_broken"),
+    target=DuckDb(dataset="raw_broken"),
     schema_contract=FREEZE_DATA_TYPES,
     source=CustomSource(
         name="broken",

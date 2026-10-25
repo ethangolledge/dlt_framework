@@ -1,11 +1,12 @@
 """The contract every source type implements."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from typing import ClassVar, Generic, TypeVar
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Generic, TypeVar
 
 import dlt
+from dlt.extract.incremental import Incremental
 from dlt.extract.resource import DltResource
 from dlt.extract.source import DltSource
 
@@ -14,6 +15,26 @@ from dlt_framework.core.resource import Resource
 from dlt_framework.core.windows import Window
 
 ConfigT = TypeVar("ConfigT")
+
+
+@dataclass(frozen=True, slots=True)
+class Extraction:
+    """One build of a source: the window it covers, and what to do once its rows are committed.
+
+    Made fresh for every extract, so what one extract holds (such as the files to dispose of)
+    never reaches another run, even of a pipeline sharing the same definition objects.
+    """
+
+    window: Window | None
+    _committed: list[Callable[[], None]] = field(default_factory=list)
+
+    def after_commit(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` once this extract's rows are committed; never after a failure."""
+        self._committed.append(callback)
+
+    def committed(self) -> None:
+        for callback in self._committed:
+            callback()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -41,9 +62,9 @@ class Source(ABC, Generic[ConfigT]):
             self.validate(resource, config)
 
     @abstractmethod
-    def resource(self, resource: Resource, config: ConfigT, window: Window | None) -> DltResource:
-        """The dlt resource named ``resource.name``, with its cursor or window pushed into the
-        upstream request so only the needed rows are fetched."""
+    def resource(self, resource: Resource, config: ConfigT, extraction: Extraction) -> DltResource:
+        """The dlt resource named ``resource.name``, with its cursor or ``extraction.window``
+        pushed into the upstream request so only the needed rows are fetched."""
 
     def requires(self) -> dict[str, str]:
         """Modules extraction needs beyond the core, mapped to the extra that installs them.
@@ -64,13 +85,36 @@ class Source(ABC, Generic[ConfigT]):
                 f"for {resource.name!r}"
             )
 
-    def build(self, resources: Iterable[Resource], window: Window | None) -> DltSource:
-        prepared = [self._prepared(resource, window) for resource in resources]
+    def build(
+        self, resources: Iterable[Resource], window: Window | None
+    ) -> tuple[DltSource, Extraction]:
+        """The dlt source extracting ``resources`` over ``window``, and its ``Extraction``, whose
+        ``committed`` the run calls once the rows are committed."""
+        extraction = Extraction(window)
+        prepared = [self._prepared(resource, extraction) for resource in resources]
         source = dlt.source(name=self.name)(lambda: prepared)()
-        return source.parallelize()
+        return source.parallelize(), extraction
 
-    def _prepared(self, resource: Resource, window: Window | None) -> DltResource:
-        dlt_resource = self.resource(resource, self.resources[resource], window)
+    @staticmethod
+    def _generator(
+        resource: Resource,
+        extraction: Extraction,
+        extract: Callable[[Incremental[Any] | None], Iterator[Any]],
+    ) -> DltResource:
+        """``extract(incremental)`` as the dlt resource ``resource.name``, given its cursor.
+
+        dlt binds state and filtering only to a parameter annotated as ``Incremental``, so
+        ``extract`` is wrapped instead of trusting it to carry the annotation.
+        """
+
+        def run(incremental: Incremental[Any] | None = None) -> Iterator[Any]:
+            yield from extract(incremental)
+
+        cursor = resource.cursor.incremental(extraction.window) if resource.cursor else None
+        return dlt.resource(run, name=resource.name)(incremental=cursor)
+
+    def _prepared(self, resource: Resource, extraction: Extraction) -> DltResource:
+        dlt_resource = self.resource(resource, self.resources[resource], extraction)
         dlt_resource.apply_hints(**resource.write.hints())
         if resource.cursor is not None:
             resource.cursor.prepare(dlt_resource)

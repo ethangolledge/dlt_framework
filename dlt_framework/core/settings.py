@@ -1,7 +1,7 @@
 """Runtime settings: how runs behave in an environment, stated in ``.dlt/config.toml``.
 
 Pipeline definitions state what lands; these state how runs behave: retries, monitoring,
-guards, notifications, and logging. They resolve through dlt's configuration system, so each key
+guards, and logging. They resolve through dlt's configuration system, so each key
 can also come from an environment variable (``RETRY__ATTEMPTS``) or a vault, and any section can
 be overridden for one pipeline, field by field:
 
@@ -18,8 +18,6 @@ from dlt.common.typing import TSecretStrValue
 from dlt_framework.core.config import REQUIRED, resolve
 from dlt_framework.core.errors import ConfigurationError
 from dlt_framework.core.retry import Retry
-
-OUTCOMES = ("failed", "succeeded")
 
 
 @configspec
@@ -44,23 +42,10 @@ class GuardSettings(BaseConfiguration):
 
 
 @configspec
-class NotificationSettings(BaseConfiguration):
-    """``on`` lists the outcomes that alert; ``channels`` names ``[notifications.<channel>]``."""
-
-    on: list[str] = REQUIRED
-    channels: list[str] = REQUIRED
-
-    def on_resolved(self) -> None:
-        if unknown := set(self.on) - set(OUTCOMES):
-            raise ConfigurationError(f"notifications.on: {sorted(unknown)}; use {list(OUTCOMES)}")
-
-
-@configspec
 class RunSettings(BaseConfiguration):
     retry: Retry = REQUIRED
     monitoring: MonitoringSettings = REQUIRED
     guards: GuardSettings = REQUIRED
-    notifications: NotificationSettings = REQUIRED
 
     @classmethod
     def of(cls, pipeline: str) -> "RunSettings":

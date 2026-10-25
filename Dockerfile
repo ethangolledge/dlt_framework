@@ -7,8 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DLT_DATA_DIR=/var/lib/dlt \
     LOGGING__FORMAT=json
 
+# System packages a pipeline needs, e.g. SYSTEM_PACKAGES="tesseract-ocr-eng" for OCR language data.
+ARG SYSTEM_PACKAGES=""
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends tini \
+    && apt-get install --yes --no-install-recommends tini $SYSTEM_PACKAGES \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system dlt \
     && useradd --system --gid dlt --home-dir /app dlt \

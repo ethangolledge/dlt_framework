@@ -25,7 +25,7 @@ FREEZE_DATA_TYPES: TSchemaContractDict = {
 @dataclass(frozen=True, kw_only=True)
 class Pipeline:
     """A named, independently runnable pipeline: what lands (``source``) and where (``target``).
-    How it runs (retries, monitoring, alerts) is stated per environment in config. Creating one
+    How it runs (retries, monitoring) is stated per environment in config. Creating one
     registers it.
 
     ``name`` is the dlt pipeline name: the key for this pipeline's state at the destination and

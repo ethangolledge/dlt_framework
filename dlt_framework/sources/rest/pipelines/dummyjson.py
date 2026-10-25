@@ -1,11 +1,11 @@
 """Example: a public demo API loaded as full snapshots."""
 
-from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Replace, Resource, Target
+from dlt_framework.core import FREEZE_DATA_TYPES, DuckDb, Pipeline, Replace, Resource
 from dlt_framework.sources.rest import RestApiSource
 
 Pipeline(
     name="dummyjson",
-    target=Target("duckdb", dataset="raw_dummyjson"),
+    target=DuckDb(dataset="raw_dummyjson"),
     schema_contract=FREEZE_DATA_TYPES,
     source=RestApiSource(
         name="dummyjson",

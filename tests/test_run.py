@@ -182,27 +182,6 @@ def test_same_pipeline_cannot_run_twice_on_one_host(tmp_path) -> None:
         pass
 
 
-@pytest.fixture
-def webhook(site, monkeypatch):
-    """A local endpoint configured as the "ops" channel; yields the alert texts it receives."""
-    site.pages["/hook"] = (200, "")
-    monkeypatch.setenv("NOTIFICATIONS__CHANNELS", '["ops"]')
-    monkeypatch.setenv("NOTIFICATIONS__OPS__KIND", "webhook")
-    monkeypatch.setenv("NOTIFICATIONS__OPS__URL", f"{site.url}/hook")
-    return site
-
-
-def test_configured_channel_alerts_on_failure_only(make_pipeline, webhook) -> None:
-    definition = make_pipeline({snapshot(): Upstream([{"id": 1, "updated_at": None}])})
-    IncrementalRun(definition)()
-    definition.source.resources[snapshot()].rows.clear()
-    with pytest.raises(GuardError):
-        IncrementalRun(definition)()
-    assert [verb for verb, _, _ in webhook.requests].count(
-        "POST"
-    ) == 1  # the failure, not the success
-
-
 def stored(name: str) -> object:
     """The committed cursor, as a fresh process would see it after syncing."""
     pipeline = dlt.pipeline(name, destination="duckdb", dataset_name="raw_shop")

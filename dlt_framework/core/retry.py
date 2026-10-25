@@ -6,6 +6,7 @@ from typing import TypeVar
 
 from dlt.common.configuration import configspec
 from dlt.common.configuration.specs import BaseConfiguration
+from dlt.common.exceptions import TerminalException
 from dlt.pipeline.helpers import retry_load
 from tenacity import (
     RetryCallState,
@@ -99,5 +100,6 @@ class Retry(BaseConfiguration):
 
 
 def _never_heals(error: BaseException) -> bool:
-    """Retrying cannot fix these: no memory, no permission, or a dependency not installed."""
-    return isinstance(error, (MemoryError, PermissionError, ImportError))
+    """Retrying cannot fix these: no memory, no permission, a dependency not installed, or an
+    error dlt or a source marks terminal (dlt only looks for that at the top of the chain)."""
+    return isinstance(error, (MemoryError, PermissionError, ImportError, TerminalException))

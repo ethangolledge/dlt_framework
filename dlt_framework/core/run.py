@@ -35,10 +35,10 @@ from dlt_framework.core.errors import (
     TransientRunError,
 )
 from dlt_framework.core.monitoring import Monitor, Sink
-from dlt_framework.core.notify import RunEvent, channels
 from dlt_framework.core.pipeline import Pipeline
 from dlt_framework.core.resource import Resource
 from dlt_framework.core.settings import RunSettings
+from dlt_framework.core.source import Extraction
 from dlt_framework.core.state import stored_cursor
 from dlt_framework.core.windows import Window
 
@@ -49,8 +49,11 @@ Unit = tuple[tuple[Resource, ...], Iterable[Window | None]]
 
 
 class Run(ABC):
-    """Settings, the monitoring sink, and alert channels resolve when the run is created, so a
-    configuration mistake stops it before anything is extracted."""
+    """Settings and the monitoring sink resolve when the run is created, so a configuration
+    mistake stops it before anything is extracted.
+
+    Alerting is the orchestrator's job: a run reports its outcome through its exit code and one
+    structured log line, per task."""
 
     mode: ClassVar[str]
     suffix: ClassVar[str] = ""
@@ -62,7 +65,6 @@ class Run(ABC):
         self.resources = self._select(resources)
         self.settings = RunSettings.of(definition.name)
         self.sink = Sink.resolve(self.settings.monitoring.uri)
-        self.notifiers = channels(self.settings.notifications)
 
     @property
     def name(self) -> str:
@@ -111,10 +113,8 @@ class Run(ABC):
                                 break
             except BaseException as error:
                 monitor.finished(rows.total(), error)
-                self._notify(RunEvent(self.name, self.mode, rows, error))
                 raise
             monitor.finished(rows.total(), None)
-        self._notify(RunEvent(self.name, self.mode, rows))
         return rows
 
     def _select(self, names: Sequence[str] | None) -> tuple[Resource, ...]:
@@ -133,7 +133,7 @@ class Run(ABC):
         if pipeline.has_pending_data:
             LOGGER.warning("Loading pending packages from an interrupted run", extra=self._log())
             with self._kept_or_discarded(pipeline):
-                retry("pending", lambda: pipeline.run([]))
+                retry("pending", lambda: self._loading(lambda: pipeline.run([])))
         self.check(pipeline)
 
     def _load(
@@ -145,20 +145,16 @@ class Run(ABC):
     ) -> Counter[str]:
         timings: dict[str, float] = {}
         try:
-            info = self._timed(
-                timings,
-                "extract",
-                lambda: pipeline.extract(
-                    self.definition.source.build(resources, window),
-                    schema_contract=self.definition.schema_contract,
-                ),
+            info, extraction = self._timed(
+                timings, "extract", lambda: self._extract(pipeline, resources, window)
             )
             with self._kept_or_discarded(pipeline):
                 (load_id,) = info.loads_ids  # one source extracted, so one package
                 rows = self._row_counts(info, resources)
                 self._check_extracted(pipeline, resources, rows)
                 self._timed(timings, "normalize", pipeline.normalize)
-                self._timed(timings, "load", pipeline.load)
+                self._timed(timings, "load", lambda: self._loading(pipeline.load))
+            extraction.committed()
         except RunError as error:
             error.locate(
                 ", ".join(resource.name for resource in resources), str(window or "increment")
@@ -169,6 +165,15 @@ class Run(ABC):
             monitor.loaded(resource, window, load_id, rows[resource.name], timings, cursor)
         LOGGER.info("Loaded %s: %s", window or "increment", dict(rows), extra=self._log())
         return rows
+
+    def _extract(
+        self, pipeline: dlt.Pipeline, resources: tuple[Resource, ...], window: Window | None
+    ) -> tuple[ExtractInfo, Extraction]:
+        """One extract attempt, built afresh: a retry never reuses spent generators, nor what a
+        failed attempt queued for after the commit."""
+        source, extraction = self.definition.source.build(resources, window)
+        info = pipeline.extract(source, schema_contract=self.definition.schema_contract)
+        return info, extraction
 
     @contextmanager
     def _kept_or_discarded(self, pipeline: dlt.Pipeline) -> Iterator[None]:
@@ -237,20 +242,15 @@ class Run(ABC):
                     step=step,
                 )
 
+    def _loading(self, call: Callable[[], T]) -> T:
+        with self.definition.target.loading():
+            return call()
+
     def _timed(self, timings: dict[str, float], step: str, call: Callable[[], T]) -> T:
         started = time.monotonic()
         result = self.settings.retry(step, call)
         timings[step] = time.monotonic() - started
         return result
-
-    def _notify(self, event: RunEvent) -> None:
-        if event.outcome not in self.settings.notifications.on:
-            return
-        for notifier in self.notifiers:
-            try:
-                notifier.send(event)
-            except Exception:
-                LOGGER.exception("Notifier %s failed", type(notifier).__name__)
 
     def _log(self) -> dict[str, str]:
         return {"pipeline": self.name, "mode": self.mode}

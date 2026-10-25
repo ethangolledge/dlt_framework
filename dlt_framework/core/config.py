@@ -2,7 +2,7 @@
 
 Settings are dlt configspecs: fields declared ``= REQUIRED`` must be stated in config (or the
 environment), and ``resolve`` fills them, looking under the given sections first. Monitoring
-sinks, notification channels, and log formats are chosen from a ``Registry`` by a configured key;
+sinks and log formats are chosen from a ``Registry`` by a configured key;
 adding one is a decorated class in any imported module, and core does not change.
 """
 

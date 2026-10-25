@@ -12,11 +12,11 @@ import pytest
 
 from dlt_framework.core import (
     FREEZE_DATA_TYPES,
+    DuckDb,
     Integer,
     Merge,
     Pipeline,
     Resource,
-    Target,
     ValueBackfill,
     ValueCursor,
 )
@@ -107,7 +107,7 @@ def make_pipeline() -> Callable[..., Pipeline]:
     ) -> Pipeline:
         return Pipeline(
             name=name,
-            target=Target("duckdb", dataset=dataset),
+            target=DuckDb(dataset=dataset),
             schema_contract=FREEZE_DATA_TYPES,
             source=CustomSource(name=source, resources=resources),
         )
@@ -175,7 +175,8 @@ def site() -> Iterator[Site]:
             status, text = served.pages.get(self.path, (404, "not found"))
             data = text.encode()
             self.send_response(status)
-            self.send_header("Content-Type", "text/html")
+            kind = "application/json" if text.startswith("{") else "text/html"
+            self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

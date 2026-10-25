@@ -9,7 +9,7 @@ from dlt_framework.core.retry import Retry
 
 DEFINITION = """
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES, Integer, Merge, Pipeline, Resource, Target, ValueBackfill, ValueCursor,
+    FREEZE_DATA_TYPES, Integer, Merge, Pipeline, Resource, DuckDb, ValueBackfill, ValueCursor,
 )
 from dlt_framework.sources.custom import CustomSource
 
@@ -26,7 +26,7 @@ ORDERS = Resource(
 
 Pipeline(
     name="shop",
-    target=Target("duckdb", dataset="raw_shop"),
+    target=DuckDb(dataset="raw_shop"),
     schema_contract=FREEZE_DATA_TYPES,
     source=CustomSource(name="shop", resources={ORDERS: orders}),
 )
@@ -116,7 +116,7 @@ def test_backfill_missing_loads_only_the_gaps(package, frames) -> None:
 
 
 NEEDS_A_MISSING_LIBRARY = """
-from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Replace, Resource, Target
+from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Replace, Resource, DuckDb
 from dlt_framework.sources.custom import CustomSource
 
 class GeoSource(CustomSource):
@@ -128,7 +128,7 @@ def places(incremental, window):
 
 Pipeline(
     name="places",
-    target=Target("duckdb", dataset="raw_places"),
+    target=DuckDb(dataset="raw_places"),
     schema_contract=FREEZE_DATA_TYPES,
     source=GeoSource(
         name="places",
@@ -152,3 +152,61 @@ def test_a_pipeline_whose_module_cannot_load_is_refused(write_package) -> None:
 def test_a_broken_import_inside_the_framework_is_a_bug(write_package) -> None:
     package = write_package("buggy", "shop", "import dlt_framework.core.no_such_module\n")
     assert main(["--package", package, "list"]) == 1
+
+
+PARALLEL = """
+from dlt.common.exceptions import TerminalValueError
+
+from dlt_framework.core import FREEZE_DATA_TYPES, Append, Pipeline, Resource, DuckDb
+from dlt_framework.sources.custom import CustomSource
+
+def rows(incremental, window):
+    yield [{"id": i} for i in range(500)]
+
+def broken(incremental, window):
+    raise TerminalValueError("upstream refused")
+    yield
+
+for name, dataset, extract in [
+    ("shop", "raw_shared", rows),  # two pipelines sharing one dataset's dlt tables
+    ("erp", "raw_shared", rows),
+    ("crm", "raw_crm", rows),
+    ("broken", "raw_broken", broken),
+]:
+    Pipeline(
+        name=name,
+        target=DuckDb(dataset=dataset),
+        schema_contract=FREEZE_DATA_TYPES,
+        source=CustomSource(
+            name=name,
+            resources={Resource(name=name, write=Append(), cursor=None, empty="fail"): extract},
+        ),
+    )
+"""
+
+
+def test_several_pipelines_run_at_once_into_one_duckdb_file(write_package, query) -> None:
+    package = write_package("client", "parallel", PARALLEL)
+    for _ in range(3):
+        assert main(["--package", package, "run", "shop", "erp", "crm"]) == 0
+    counts = [
+        query(f"SELECT count(*) FROM {dataset}.{table}")[0][0]
+        for dataset, table in [("raw_shared", "shop"), ("raw_shared", "erp"), ("raw_crm", "crm")]
+    ]
+    assert counts == [1500, 1500, 1500]
+
+
+def test_one_failing_pipeline_does_not_stop_the_others(write_package, query) -> None:
+    package = write_package("client", "parallel", PARALLEL)
+    assert main(["--package", package, "run", "broken", "shop"]) == TerminalRunError.exit_code
+    assert query("SELECT count(*) FROM raw_shared.shop") == [(500,)]
+
+
+def test_per_pipeline_options_need_one_pipeline(write_package) -> None:
+    package = write_package("client", "parallel", PARALLEL)
+    for command in (
+        ["run", "shop", "erp", "--resource", "shop"],
+        ["run", "shop", "erp", "--allow-initial-load"],
+        ["backfill", "shop", "erp", "--resource", "shop"],
+    ):
+        assert main(["--package", package, *command]) == 2

@@ -6,11 +6,11 @@ from conftest import Site
 from dlt_framework.core import (
     FREEZE_DATA_TYPES,
     Append,
+    DuckDb,
     Integer,
     Pipeline,
     Resource,
     RowBackfill,
-    Target,
     ValueCursor,
 )
 from dlt_framework.core.errors import TransientRunError
@@ -51,7 +51,7 @@ def pipeline(posts_spider, cursor=None, backfill=None) -> Pipeline:
     )
     return Pipeline(
         name="site",
-        target=Target("duckdb", dataset="raw_site"),
+        target=DuckDb(dataset="raw_site"),
         schema_contract=FREEZE_DATA_TYPES,
         source=ScrapeSource(name="site", resources={resource: posts_spider}),
     )
@@ -118,3 +118,24 @@ def test_row_windows_reach_the_spider_as_pages(site) -> None:
                 yield {"id": int(post.attrib["data-id"]), "text": post.css("::text").get()}
 
     assert BackfillRun(pipeline(Paged, backfill=RowBackfill(size=3)))() == {"posts": 8}
+
+
+def test_saved_documents_are_stored_once_by_content(site, tmp_path) -> None:
+    site.pages["/page/1"] = (200, '<a class="doc" href="/files/report.pdf">report</a>')
+    site.pages["/files/report.pdf"] = (200, "%PDF-1.4 report")
+    landing = tmp_path / "landing"
+
+    class Reports(spider(site)):
+        documents = landing.as_uri()
+
+        async def parse(self, response):
+            for href in response.css("a.doc::attr(href)").getall():
+                yield response.follow(href, callback=self.stored)
+
+        async def stored(self, response):
+            yield {"url": response.url, "document": await self.save(response)}
+
+    definition = pipeline(Reports)
+    assert IncrementalRun(definition)() == {"posts": 1}
+    assert IncrementalRun(definition)() == {"posts": 1}
+    assert [path.read_bytes() for path in landing.iterdir()] == [b"%PDF-1.4 report"]

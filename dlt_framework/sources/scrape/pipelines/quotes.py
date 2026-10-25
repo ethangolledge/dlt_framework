@@ -5,7 +5,7 @@ from typing import Any
 
 from scrapling.spiders import Request, Response
 
-from dlt_framework.core import FREEZE_DATA_TYPES, Append, Pipeline, Resource, Target
+from dlt_framework.core import FREEZE_DATA_TYPES, Append, DuckDb, Pipeline, Resource
 from dlt_framework.sources.scrape import ScrapeSource, ScrapeSpider
 
 
@@ -31,7 +31,7 @@ class QuotesSpider(ScrapeSpider):
 
 Pipeline(
     name="quotes",
-    target=Target("duckdb", dataset="raw_quotes"),
+    target=DuckDb(dataset="raw_quotes"),
     schema_contract=FREEZE_DATA_TYPES,
     source=ScrapeSource(
         name="quotes",

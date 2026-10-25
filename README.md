@@ -11,14 +11,16 @@ monitoring.
 ```
 dlt_framework/
   core/                 shared by every source type; never imports a source package
-    config.py           settings resolution and registries (sinks, notifiers, log formats)
-    settings.py         what config.toml must state: retry, monitoring, guards, notifications, logging
+    config.py           settings resolution and registries (sinks, log formats)
+    settings.py         what config.toml must state: retry, monitoring, guards, logging
     run.py              the run spine: incremental runs, backfills, guards, rollback
+    buckets.py          folders and buckets by URL, with one credentials setting
     monitoring/         run, load and resource frames, sinks, coverage, status
   sources/
     rest/               RestApiSource       + pipelines/ defined on it
     sql/                SqlSource           (SQL Server, Postgres, ...)
     filesystem/         FilesystemSource    (S3, GCS, Azure, local)
+      documents/        Documents reader    (PDFs to rows: templates, model, OCR)
     custom/             CustomSource        (any Python generator)
     scrape/             ScrapeSource        (web pages through Scrapling spiders)
   cli.py                one entry point for every pipeline
@@ -38,10 +40,12 @@ REST and custom source types; each destination and every other source type is an
 | *(core)* | dlt, Polars, psutil, SQLAlchemy, tenacity: runs, monitoring, `RestApiSource`, `CustomSource` | small |
 | `duckdb` | DuckDB destination | small |
 | `postgres` | Postgres destination (and Postgres monitoring sink) | small |
-| `sql` | `SqlSource`, with the `pyarrow` backend | medium |
-| `connectorx` | `SqlSource(backend="connectorx")`, includes `sql` | medium |
+| `sql` | `SqlSource`, with the `PyArrow()` backend | medium |
+| `mssql` | SQL Server for `SqlSource` and the monitoring sink (pymssql; no system driver), includes `sql` | medium |
+| `connectorx` | `SqlSource(backend=ConnectorX())`, includes `sql` | medium |
 | `filesystem` | `FilesystemSource`: local folders and S3, CSV/JSONL/Parquet readers | medium |
 | `gcs` / `azure` | `gs://` / `az://` buckets for `FilesystemSource`, includes `filesystem` | medium |
+| `documents` | `Documents` reader for `FilesystemSource`: PDFs to rows, OCR for scans (LiteParse, Anthropic SDK) | small |
 | `scrape` | `ScrapeSource`: Scrapling with its fetchers | large (~700 MB in the image: Scrapling's spiders import its browser automation packages even for plain HTTP) |
 
 ```bash
@@ -65,7 +69,7 @@ Everything that decides what lands is a required argument; nothing defaults.
 | Component | Variants |
 | --- | --- |
 | `Pipeline(name, source, target, schema_contract)` | Unique, permanent name = dlt state key. Each table has one owning pipeline. |
-| `Target(destination, dataset)` | Credentials from dlt env vars / `.dlt/secrets.toml` |
+| Target | `DuckDb(dataset=...)`, `Postgres(dataset=...)`; credentials from dlt env vars / `.dlt/secrets.toml` |
 | `Resource(name, write, cursor, empty, backfill=None)` | One stream of rows into one table |
 | Write mode | `Append()`, `Replace()`, `Merge(primary_key=..., strategy=...)` |
 | Cursor | `TimeCursor(path, start, format, on_missing)`, `ValueCursor(path, start, format, on_missing)`, or `None` |
@@ -78,11 +82,11 @@ Everything that decides what lands is a required argument; nothing defaults.
 from datetime import datetime, timezone
 
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES, Duration, IsoTimestamp, Merge, Pipeline, Resource, RowVersion, Target,
+    FREEZE_DATA_TYPES, Duration, IsoTimestamp, Merge, Pipeline, Postgres, Resource, RowVersion,
     TimeBackfill, TimeCursor, ValueBackfill, ValueCursor,
 )
 from dlt_framework.sources.rest import RestApiSource
-from dlt_framework.sources.sql import SqlSource
+from dlt_framework.sources.sql import PyArrow, SqlSource
 
 orders = Resource(
     name="orders",
@@ -99,7 +103,7 @@ orders = Resource(
 
 Pipeline(
     name="acme_shop",
-    target=Target("postgres", dataset="raw_shop"),
+    target=Postgres(dataset="raw_shop"),
     schema_contract=FREEZE_DATA_TYPES,
     source=RestApiSource(
         name="shop",
@@ -120,9 +124,9 @@ ledger = Resource(
 
 Pipeline(
     name="erp_finance",
-    target=Target("postgres", dataset="raw_erp"),
+    target=Postgres(dataset="raw_erp"),
     schema_contract=FREEZE_DATA_TYPES,
-    source=SqlSource(name="erp", backend="pyarrow", resources={ledger: {"table": "Ledger"}}),
+    source=SqlSource(name="erp", backend=PyArrow(), resources={ledger: {"table": "Ledger"}}),
 )
 ```
 
@@ -136,7 +140,7 @@ configuration system, highest precedence first:
 2. a per-pipeline section, `[pipelines.<name>.<section>]`, which only needs the keys it changes;
 3. the shared section.
 
-Secrets (`monitoring.uri`, webhook URLs, credentials) live in `.dlt/secrets.toml` locally and in
+Secrets (`monitoring.uri`, credentials) live in `.dlt/secrets.toml` locally and in
 environment variables in containers.
 
 | Section | Keys | Decides |
@@ -144,19 +148,11 @@ environment variables in containers.
 | `[retry]` | `attempts`, `initial_wait_s`, `max_wait_s`, `give_up_after_s` | Jittered exponential backoff for transient failures; a step gives up after `attempts` or `give_up_after_s`, so a database down for minutes is ridden out |
 | `[monitoring]` | `uri` (secret), `sample_every_s`, `flush_every_s` | Where monitoring goes, and how often memory and CPU are sampled and written |
 | `[guards]` | `future_cursor_tolerance_s` | How far ahead of now a time cursor may move before the run refuses it |
-| `[notifications]` | `on`, `channels`; `[notifications.<channel>] kind`, plus that kind's fields | Which outcomes alert, and through which channels |
 | `[logging]` | `format`, `level` | One log format for framework and dlt lines |
 
 ```toml
 [pipelines.acme_shop.retry]
 give_up_after_s = 3600          # this API has hour-long maintenance windows
-
-[notifications]
-on = ["failed"]
-channels = ["ops"]
-
-[notifications.ops]
-kind = "webhook"                # notifications.ops.url goes in secrets.toml
 ```
 
 dlt's own performance settings live in the same file: `[extract] workers`,
@@ -165,13 +161,12 @@ retries.
 
 ### Swapping implementations
 
-Monitoring sinks, alert channels, and log formats are chosen from config by key. A new one is a
+Monitoring sinks and log formats are chosen from config by key. A new one is a
 registered class; nothing in core changes.
 
 | Kind | Chosen by | Shipped | Add one |
 | --- | --- | --- | --- |
-| Monitoring sink | `monitoring.uri` scheme | `ParquetSink` (`file`, `s3`, `gs`, `az`, ...), `DatabaseSink` (`postgresql`, `mssql`, `mysql`, `sqlite`) | `@sinks.register("scheme")` on a `Sink` with `from_uri`, `write`, `read` |
-| Alert channel | `notifications.<channel>.kind` | `WebhookNotifier` (`webhook`: Slack, Mattermost, any JSON endpoint) | `@notifiers.register("kind")` on a `@configspec` `Notifier` with `send` |
+| Monitoring sink | `monitoring.uri` scheme | `ParquetSink` (`file`, `s3`, `gs`, `az`, ...), `DatabaseSink` (`postgresql`, `mssql`, `sqlite`) | `@sinks.register("scheme")` on a `Sink` with `from_uri`, `write`, `read` |
 | Log format | `logging.format` | `text`, `json` | `@formatters.register("name")` on a `logging.Formatter` |
 
 ## Commands
@@ -179,8 +174,8 @@ registered class; nothing in core changes.
 ```text
 pipeline list                                             pipelines ready to run here
 pipeline check [NAME]                                     readiness of every pipeline, or one built offline
-pipeline run NAME [--resource R ...] [--allow-initial-load]
-pipeline backfill NAME [--resource R ...] [--from X] [--to Y] [--missing]
+pipeline run NAME [NAME ...] [--resource R ...] [--allow-initial-load]
+pipeline backfill NAME [NAME ...] [--resource R ...] [--from X] [--to Y] [--missing]
 pipeline status [NAME]                                    last runs, cursors, backfill coverage
 ```
 
@@ -193,6 +188,12 @@ pipeline status [NAME]                                    last runs, cursors, ba
   - `--from X --to Y` (with one `--resource`) loads exactly `[X, Y)` in that resource's window
     edges: ISO-8601 datetimes with a timezone, integers (ids, rowversions), or row offsets.
   - `--missing` loads only the gaps that monitoring has no successful window for.
+- **Several names** (`pipeline run shop erp crm`) run those pipelines at the same time, each on
+  its own thread of one process, because DuckDB lets only one process write a file. Each logs
+  its own outcome, one failing does not stop the others, and the exit code is that of the first
+  named to fail. They share one connection per DuckDB file and load to it one at a time, while
+  extract and normalize run at once. `--resource` and `--allow-initial-load` need one name.
+  Monitoring samples memory and CPU for the whole process.
 - **status** shows, per resource:
   - the last run, its mode and outcome (`lost or running` when it never reported one);
   - the last success, the rows loaded, and the cursor's position;
@@ -225,8 +226,8 @@ pipeline status [NAME]                                    last runs, cursors, ba
 ## Performance and scaling
 
 - **SQL backends.** `SqlSource(backend=...)` is required:
-  - `pyarrow` keeps exact types and runs 20–30× faster than `sqlalchemy`.
-  - `connectorx` is the fastest, with costs: it reads whole results into memory (it ignores
+  - `PyArrow()` keeps exact types and runs 20–30× faster than `SqlAlchemy()`.
+  - `ConnectorX()` is the fastest, with costs: it reads whole results into memory (it ignores
     `chunk_size`) and drops timezones from tz-aware timestamps. The framework rejects it with a
     tz-aware time cursor, and derives its connection string from the credentials.
   - Install it with the `connectorx` extra.
@@ -266,8 +267,8 @@ ERROR dlt_framework.cli: run acme_shop failed in extract of orders, window time 
 - **One handler for every line.** dlt's own logger is set to `WARNING` and shares the framework's
   handler, so `[logging] format` controls every line.
 - **Secrets are masked.** The handler masks URL passwords and query-string values
-  (`?api_key=***`) in every line, tracebacks included. Monitoring `error_message` and alerts are
-  masked the same way.
+  (`?api_key=***`) in every line, tracebacks included. Monitoring `error_message` is masked the
+  same way.
 - **Unknown errors exit 4, not 3.** dlt treats any error it doesn't recognise as transient, so it
   is retried before it fails.
 
@@ -335,15 +336,82 @@ class PostsSpider(ScrapeSpider):
   libraries.
 - **Your responsibility.** Check each site's terms and robots.txt, and whether pages hold
   personal data, before scraping it.
+- **Documents.** A spider that downloads PDFs states `documents` and calls
+  `await self.save(response)`; see *Documents*.
+
+## Documents
+
+PDFs become rows in two pipelines that meet at a folder or bucket, so the extraction never
+depends on where a document came from: a spider, SharePoint, or files dropped in a bucket.
+
+1. **Download.** A spider states `documents`, a folder or bucket URL, and calls
+   `await self.save(response)` on each PDF it finds. Files are named by content hash, so a document
+   seen twice is stored once.
+2. **Extract.** A `FilesystemSource` with a `Documents` reader (the `documents` extra) reads that
+   folder into rows of a Pydantic model you state, then disposes of each file once its rows are
+   committed.
+
+```bash
+pipeline run filings && pipeline run invoices
+```
+
+```python
+class Invoice(BaseModel):
+    number: str
+    total: Decimal
+    lines: list[Line]                # lands as the child table invoices__lines
+
+reader = Documents(
+    schema=Invoice,
+    extract=(                        # tried in order; the first result that validates lands
+        Template(                    # a known layout: local, free, exact
+            name="acme",
+            match="ACME Ltd",        # found only in this layout
+            fields={
+                "number": Text(r"Invoice (\S+)"),
+                "total": Text(r"Total (\S+)"),
+                "lines": Table(
+                    columns={"item": 50, "amount": 200},  # left edge of each column, in points
+                    key="amount",
+                    starts=r"[\d.]+",   # a row starts where its amount is a number
+                ),
+            },
+        ),
+        Model(name="claude-haiku-5-5", instructions="A supplier invoice."),  # anything else
+    ),
+    on_invalid="raise",              # or "warn": log it, load the rest, leave the file
+    once_loaded=Delete(),            # or Keep(), or Archive("s3://bucket/documents")
+)
+files = Files(bucket_url="file:///data/landing", file_glob="*.pdf", reader=reader)
+```
+
+- **Cost.** Templates and OCR run locally. `Model` runs at low effort, only on documents no
+  template read, and is sent the text of a born-digital PDF or the pages of a scan. Each row
+  records `extracted_by`.
+- **Validation.** Template values arrive as text and the schema's types and validators parse
+  them, so a layout that has drifted fails instead of landing wrong.
+- **Layouts.** `Table` places words in columns by position rather than trusting detected cell
+  borders, which break on shaded and borderless tables. `Document.read(data, None).pages` shows
+  where each header word sits.
+- **Scans.** `ocr=Ocr(languages=("eng",), tessdata="/usr/share/tessdata")` reads a scan with the
+  Tesseract bundled in LiteParse, each word where it is printed, so printed scans are read by
+  templates. `tessdata` holds the language data (the `tesseract-ocr-eng` package, or `None` to
+  download it on first use). Pages are not turned upright, and tick boxes and handwriting are
+  not text: `Model` is sent a scan's page images, so it still sees them.
+- **Disposal.** `Delete()` and `Archive(bucket_url)` act only after the rows are committed, so a
+  failed run loses nothing. Buckets use `sources.filesystem.credentials`, as listing does.
+- **Keys.** `Model` reads `ANTHROPIC_API_KEY`. Merge on `document` (the file path) so a re-read
+  file replaces its rows.
 
 ## Adding to the framework
 
 | To add | Write | Touch core? |
 | --- | --- | --- |
 | A pipeline | `sources/<type>/pipelines/<system>.py` with a `Pipeline(...)`; then `pipeline check <name>` and `pipeline run <name>` | No |
-| A source type (GraphQL, MongoDB, Shopify) | `sources/<type>/`: subclass `Source[ConfigT]`, implement `resource`, list `windows`, add its quirks in `validate`. A library the core lacks becomes an extra named after the source type in `pyproject.toml`, plus a row in *Installing* | No |
+| A source type (GraphQL, MongoDB, Shopify) | `sources/<type>/`: subclass `Source[ConfigT]`, implement `resource`, list `windows`, add its quirks in `validate`. Work due once rows are committed goes to `extraction.after_commit`. A library the core lacks becomes an extra named after the source type in `pyproject.toml`, plus a row in *Installing* | No |
+| A destination | A `Target` subclass naming its dlt `destination` and the driver it `requires()` | Yes, `core/target.py` |
 | A cursor format | A `TimeFormat` or `ValueFormat` with `render` and `parse` | No, if it lives in the source package |
-| A sink, alert channel, or log format | A registered class (see *Swapping implementations*) | No |
+| A sink or log format | A registered class (see *Swapping implementations*) | No |
 
 ## Running locally
 
@@ -371,6 +439,10 @@ docker run --rm --user "$(id -u):$(id -g)" --env-file .env \
   --mount type=bind,source="$(pwd)/dlt_state",target=/var/lib/dlt \
   dlt-pipelines run dummyjson
 ```
+
+A pipeline that needs a system package states it at build time too, e.g. OCR language data:
+`--build-arg EXTRAS="--extra duckdb --extra documents" --build-arg SYSTEM_PACKAGES="tesseract-ocr-eng"`
+(`tessdata="/usr/share/tesseract-ocr/5/tessdata"`).
 
 The scheduler must:
 - guarantee one active job per pipeline name across hosts (the built-in lock covers one host);

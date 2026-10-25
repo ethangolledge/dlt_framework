@@ -22,11 +22,11 @@ the fix is still a migration.
 | --- | --- | --- | --- |
 | Pipeline | `<client>_<system>`, snake_case, no `__`, permanent | `acme_shop` | `Pipeline(name=...)` |
 | Backfill pipeline | `<pipeline>__backfill`, **derived by `BackfillRun`, never configured** | `acme_shop__backfill` | `core/run.py` |
-| Dataset | `raw_<system>`, shared by both run types | `raw_shop` | `Target(dataset=...)` |
+| Dataset | `raw_<system>`, shared by both run types | `raw_shop` | `DuckDb(dataset=...)` / `Postgres(dataset=...)` |
 | Source | Upstream system, snake_case, permanent | `shop` | `Source(name=...)` |
 | Resource | snake_case plural entity; also the destination table name | `orders`, `order_line_items` | `Resource(name=...)` |
 | Cursor path | The upstream field path, verbatim | `updated_at` | `TimeCursor/ValueCursor(path=...)` |
-| DuckDB file | never equal to a dataset name (`Target` enforces) | `/data/warehouse.duckdb` | `DESTINATION__DUCKDB__CREDENTIALS` |
+| DuckDB file | never equal to a dataset name (`DuckDb` enforces) | `/data/warehouse.duckdb` | `DESTINATION__DUCKDB__CREDENTIALS` |
 
 The upstream name can differ from the resource name. For example, SQL Server `dbo.Orders` maps to
 resource `orders` through the SQL config key `table`.
@@ -35,8 +35,10 @@ Rules:
 
 - A pipeline is a group of resources on one schedule. `--resource` runs a subset (state is per
   resource). Never run the same pipeline name in two processes at once: `PipelineLock` stops it on
-  one host; across hosts the scheduler must. Resources already extract in parallel threads; for
-  separate processes, define separate pipelines with separate names (each table has one owner).
+  one host; across hosts the scheduler must. Resources already extract in parallel threads. To run
+  pipelines at the same time, name them in one command (`pipeline run shop erp`): they run on
+  threads of one process, which DuckDB needs, sharing one connection per file and loading to it one
+  at a time. Pipelines loading elsewhere can also run as separate processes.
 - Treat renaming any name in the table as a **migration**, not a refactor. It needs a written plan
   for the stored cursor (keep the old name, or re-seed through a backfill and
   `--allow-initial-load`) and user sign-off.
@@ -51,7 +53,7 @@ only in class attributes and the `units` / `check` hooks:
 
 | | `IncrementalRun` | `BackfillRun` |
 | --- | --- | --- |
-| Command | `pipeline run NAME [--resource R ...] [--allow-initial-load]` | `pipeline backfill NAME [--resource R ...] [--from X] [--to Y] [--missing]` |
+| Command | `pipeline run NAME [NAME ...] [--resource R ...] [--allow-initial-load]` | `pipeline backfill NAME [NAME ...] [--resource R ...] [--from X] [--to Y] [--missing]` |
 | dlt pipeline name | `NAME` | `NAME__backfill` |
 | Dataset / tables | `Target.dataset` | same dataset, same tables |
 | Units | one: the selected resources, window `None` (resume from stored cursor) | one per selected resource with a declared `backfill`, over its windows (narrowed by `--from/--to`, or the gaps for `--missing`) |

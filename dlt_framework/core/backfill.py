@@ -75,6 +75,9 @@ class Duration:
     amount: int
     unit: Literal["months", "weeks", "days", "hours", "minutes", "seconds"]
 
+    def __post_init__(self) -> None:
+        _positive(self.amount, "Duration amount")
+
     def after(self, start: datetime, steps: int) -> datetime:
         """``start`` plus ``steps`` durations; months stay anchored to ``start``'s day."""
         total = self.amount * steps
@@ -94,6 +97,10 @@ class TimeBackfill(Backfill):
     start: datetime
     every: Duration
 
+    def __post_init__(self) -> None:
+        if self.start.tzinfo is None:
+            raise DefinitionError(f"TimeBackfill start {self.start} must be timezone-aware")
+
     def bounds(self, cursor_start: Any) -> tuple[datetime, datetime]:
         return self.start, cursor_start
 
@@ -111,6 +118,9 @@ class ValueBackfill(Backfill):
 
     start: int
     every: int
+
+    def __post_init__(self) -> None:
+        _positive(self.every, "ValueBackfill every")
 
     def bounds(self, cursor_start: Any) -> tuple[int, int]:
         return self.start, cursor_start
@@ -132,8 +142,17 @@ class RowBackfill(Backfill):
 
     size: int
 
+    def __post_init__(self) -> None:
+        _positive(self.size, "RowBackfill size")
+
     def bounds(self, cursor_start: Any) -> tuple[int, None]:
         return 0, None
 
     def advance(self, origin: int, steps: int) -> int:
         return origin + self.size * steps
+
+
+def _positive(value: int, name: str) -> None:
+    """A step of zero or less never advances: its backfill would loop over the same window."""
+    if value <= 0:
+        raise DefinitionError(f"{name} must be positive, not {value}")

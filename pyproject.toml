@@ -27,11 +27,13 @@ sql = [
     "dlt[sql_database,parquet]~=1.29.0",
     "numpy>=2.4,<2.5",  # the pyarrow backend; one version for every supported Python
 ]
+mssql = ["dlt-framework[sql]", "pymssql>=2.3,<3"]  # SQL Server; wheels bundle FreeTDS, no system driver
 connectorx = ["dlt-framework[sql]", "connectorx>=0.4.2,<0.5"]
-filesystem = ["dlt[filesystem,s3,parquet,duckdb]~=1.29.0", "duckdb>=1.5,<2"]  # local and S3; duckdb reads CSV
+filesystem = ["dlt-framework[duckdb]", "dlt[filesystem,s3,parquet]~=1.29.0"]  # local and S3; duckdb reads CSV
 gcs = ["dlt-framework[filesystem]", "dlt[gs]~=1.29.0"]  # gs:// buckets
 azure = ["dlt-framework[filesystem]", "dlt[az]~=1.29.0"]  # az:// and abfs:// buckets
 scrape = ["scrapling[fetchers]~=0.5.0"]  # plain HTTP; browser fetchers also need `scrapling install`
+documents = ["anthropic>=2.3,<3", "liteparse~=2.17.0", "pydantic>=2.14,<3"]  # PDFs to rows, OCR
 
 [project.scripts]
 pipeline = "dlt_framework.cli:entrypoint"
@@ -40,6 +42,7 @@ pipeline = "dlt_framework.cli:entrypoint"
 dev = [
     "import-linter>=2.15",
     "mypy>=1.15,<2",
+    "pillow>=13,<14",
     "pytest>=8,<10",
     "pytest-cov>=6,<8",
     "ruff>=0.11,<1",
@@ -78,6 +81,10 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["fsspec.*"]  # untyped; installed with dlt
+ignore_missing_imports = true
 
 [tool.importlinter]
 root_package = "dlt_framework"

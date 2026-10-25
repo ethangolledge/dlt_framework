@@ -90,7 +90,7 @@ Reserved words used as column aliases, such as `rows`, need quoting: `AS "rows"`
 
 When the database was loaded by this repo's pipelines:
 
-- **One schema per dataset**, named in the pipeline's `Target(dataset=...)`.
+- **One schema per dataset**, named in the pipeline's `DuckDb(dataset=...)`.
 - **Ignore `*_staging*` schemas**: they are dlt's working area.
 - **Tables starting `_dlt_` are dlt's bookkeeping.**
 - **Lists become child tables.** A list field `tags` on `quotes` lands in `quotes__tags`. Join with

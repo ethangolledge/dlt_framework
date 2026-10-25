@@ -15,6 +15,7 @@ from dlt_framework.core import (
     FREEZE_DATA_TYPES,
     Append,
     AwareDatetime,
+    DuckDb,
     Duration,
     Integer,
     IsoTimestamp,
@@ -23,17 +24,16 @@ from dlt_framework.core import (
     Resource,
     RowBackfill,
     RowVersion,
-    Target,
     TimeBackfill,
     TimeCursor,
     ValueBackfill,
     ValueCursor,
 )
-from dlt_framework.core.errors import GuardError
+from dlt_framework.core.errors import DefinitionError, GuardError
 from dlt_framework.core.run import BackfillRun, IncrementalRun
-from dlt_framework.sources.filesystem import Files, FilesystemSource
+from dlt_framework.sources.filesystem import Csv, Files, FilesystemSource
 from dlt_framework.sources.rest import RestApiSource
-from dlt_framework.sources.sql import SqlSource
+from dlt_framework.sources.sql import ConnectorX, PyArrow, SqlAlchemy, SqlSource
 
 UTC = UTC
 MERGE = Merge(primary_key=("id",), strategy="delete-insert")
@@ -42,7 +42,7 @@ MERGE = Merge(primary_key=("id",), strategy="delete-insert")
 def define(name: str, source) -> Pipeline:
     return Pipeline(
         name=name,
-        target=Target("duckdb", dataset="raw_shop"),
+        target=DuckDb(dataset="raw_shop"),
         schema_contract=FREEZE_DATA_TYPES,
         source=source,
     )
@@ -144,7 +144,7 @@ def erp(tmp_path, monkeypatch) -> None:
 
 def sql_pipeline(resource: Resource, **config) -> Pipeline:
     options = {"table": "Orders", **config}
-    return define("erp", SqlSource(name="erp", backend="sqlalchemy", resources={resource: options}))
+    return define("erp", SqlSource(name="erp", backend=SqlAlchemy(), resources={resource: options}))
 
 
 def test_sql_value_backfill_is_a_bounded_where_clause(erp, query) -> None:
@@ -183,7 +183,7 @@ def test_filesystem_loads_new_files_and_backfills_by_modification_date(tmp_path,
         empty="warn",
         backfill=TimeBackfill(start=cursor_start - timedelta(days=7), every=Duration(7, "days")),
     )
-    files = Files(bucket_url=folder.as_uri(), file_glob="*.csv", reader="csv")
+    files = Files(bucket_url=folder.as_uri(), file_glob="*.csv", reader=Csv())
     definition = define("files", FilesystemSource(name="files", resources={resource: files}))
 
     assert IncrementalRun(definition)()["orders"] == 1
@@ -225,7 +225,7 @@ def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, que
         backfill=ValueBackfill(start=1000, every=2),
     )
     source = SqlSource(
-        name="ledger", backend="sqlalchemy", resources={resource: {"table": "Ledger"}}
+        name="ledger", backend=SqlAlchemy(), resources={resource: {"table": "Ledger"}}
     )
     definition = define("ledger", source)
 
@@ -236,7 +236,7 @@ def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, que
     assert increments["cursor_last_value"].to_list() == ["1006"]  # readable, not b'\\x00...'
 
 
-BACKENDS = ["sqlalchemy", "pyarrow", "connectorx"]
+BACKENDS = [SqlAlchemy(), PyArrow(), ConnectorX()]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -251,3 +251,19 @@ def test_sql_backends_load_the_same_rows_and_cursor(erp, query, frames, backend)
     assert IncrementalRun(define("erp", source))()["orders"] == 4
     assert query("SELECT id FROM raw_shop.orders ORDER BY id") == [(2,), (3,), (4,), (5,)]
     assert frames("loads")["cursor_last_value"].to_list() == ["50"]
+
+
+def test_connectorx_refuses_a_timezone_aware_cursor_it_would_compare_wrongly() -> None:
+    resource = Resource(
+        name="orders",
+        write=MERGE,
+        cursor=TimeCursor(
+            path="updated_at",
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            format=AwareDatetime(),
+            on_missing="raise",
+        ),
+        empty="warn",
+    )
+    with pytest.raises(DefinitionError):
+        SqlSource(name="erp", backend=ConnectorX(), resources={resource: {}})

@@ -10,7 +10,9 @@ frame are the record, so runs stay stateless outside dlt and work on ephemeral r
 """
 
 import asyncio
+import hashlib
 import logging
+import posixpath
 import queue
 import threading
 from collections import Counter
@@ -18,15 +20,16 @@ from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlparse
 
-import dlt
 from dlt.extract.incremental import Incremental
 from dlt.extract.resource import DltResource
 from scrapling.spiders import Request, Response, Spider
 
+from dlt_framework.core import buckets
 from dlt_framework.core.errors import DefinitionError
 from dlt_framework.core.resource import Resource
-from dlt_framework.core.source import Source
+from dlt_framework.core.source import Extraction, Source
 from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow, Window
 
 LOGGER = logging.getLogger(__name__)
@@ -55,9 +58,14 @@ class ScrapeSpider(Spider):
     ``max_blocked_retries``, and requests skipped by robots.txt (disallowed, or robots.txt itself
     unreachable, which Scrapling treats the same). They are collected here. Its log lines go
     through the framework's handler, so they share the log format and the masking of URL secrets.
+
+    A spider that downloads documents states ``documents``, a folder or bucket URL, and calls
+    ``await self.save(response)``; a ``FilesystemSource`` with a ``Documents`` reader extracts
+    them from there.
     """
 
     failed_requests: ClassVar[FailedRequests]
+    documents: ClassVar[str]
     logging_level = logging.WARNING
 
     def __init__(self, incremental: Incremental[Any] | None, window: Window | None) -> None:
@@ -68,6 +76,23 @@ class ScrapeSpider(Spider):
         for handler in [h for h in self.logger.handlers if type(h) is logging.StreamHandler]:
             self.logger.removeHandler(handler)
         self.logger.propagate = True
+
+    async def save(self, response: Response) -> str:
+        """Store a downloaded document under ``documents`` and return its URL.
+
+        Named by content hash, so a document saved again while still stored is not rewritten
+        (nor re-extracted). The write runs off the event loop, so a slow bucket does not stall
+        the crawl.
+        """
+        documents = getattr(self, "documents", None)
+        if documents is None:
+            raise DefinitionError(f"{type(self).__name__} saves documents: state `documents`")
+        body = response.body
+        suffix = posixpath.splitext(urlparse(response.url).path)[1]
+        url = f"{documents.rstrip('/')}/{hashlib.sha256(body).hexdigest()[:16]}{suffix}"
+        if not await asyncio.to_thread(buckets.exists, url):
+            await asyncio.to_thread(buckets.write, url, body)
+        return url
 
     async def on_error(self, request: Request, error: Exception) -> None:
         self.failures.append(f"{request.url}: {type(error).__name__}: {error}")
@@ -112,6 +137,13 @@ class ScrapeSource(Source[type[ScrapeSpider]]):
 
     windows: ClassVar[tuple[type[Window], ...]] = (TimeWindow, ValueWindow, RowWindow)
 
+    def requires(self) -> dict[str, str]:
+        needed: dict[str, str] = {}
+        for spider in self.resources.values():
+            if documents := getattr(spider, "documents", None):
+                needed |= buckets.requires(documents)
+        return needed
+
     def validate(self, resource: Resource, config: type[ScrapeSpider]) -> None:
         super().validate(resource, config)
         if not (isinstance(config, type) and issubclass(config, ScrapeSpider)):
@@ -121,16 +153,14 @@ class ScrapeSource(Source[type[ScrapeSpider]]):
             raise DefinitionError(f"{config.__name__} must state {missing}")
 
     def resource(
-        self, resource: Resource, config: type[ScrapeSpider], window: Window | None
+        self, resource: Resource, config: type[ScrapeSpider], extraction: Extraction
     ) -> DltResource:
-        # dlt binds state and filtering only to a parameter annotated as Incremental.
-        def crawl(incremental: Incremental[Any] | None = None) -> Iterator[Any]:
-            spider = config(incremental, window)
+        def crawl(incremental: Incremental[Any] | None) -> Iterator[Any]:
+            spider = config(incremental, extraction.window)
             yield from _items(spider)
             spider.raise_for_failures()
 
-        cursor = resource.cursor.incremental(window) if resource.cursor else None
-        return dlt.resource(crawl, name=resource.name)(incremental=cursor)
+        return self._generator(resource, extraction, crawl)
 
 
 @dataclass(frozen=True, slots=True)

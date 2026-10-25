@@ -4,7 +4,7 @@ import psycopg2
 import pytest
 from conftest import ORDERS, Upstream
 
-from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Target
+from dlt_framework.core import FREEZE_DATA_TYPES, Pipeline, Postgres
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.sources.custom import CustomSource
 
@@ -20,7 +20,7 @@ def test_postgres_run_and_backfill(monkeypatch) -> None:
     upstream = Upstream([{"id": 1, "updated_at": 50}, {"id": 2, "updated_at": 100}])
     definition = Pipeline(
         name="ci",
-        target=Target("postgres", dataset="raw_ci"),
+        target=Postgres(dataset="raw_ci"),
         schema_contract=FREEZE_DATA_TYPES,
         source=CustomSource(name="ci", resources={ORDERS: upstream}),
     )

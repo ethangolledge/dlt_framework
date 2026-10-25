@@ -1,17 +1,20 @@
 """Command line: ``pipeline list|check|run|backfill|status``.
 
-Each command acts on one named pipeline (``status`` on one or all), so separate processes or
-containers run different pipelines, such as a SQL database and an S3 bucket, at the same time.
+``run`` and ``backfill`` take one or more pipeline names and run them at the same time, each on
+its own thread of this one process: pipelines are independent, and DuckDB lets only one process
+write a file. Separate processes or containers can still run pipelines loading elsewhere.
 """
 
 import argparse
 import logging
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import polars as pl
+from dlt.common.runtime import signals
 
 from dlt_framework.core import logs
 from dlt_framework.core.config import resolve
@@ -31,9 +34,8 @@ from dlt_framework.core.monitoring import (
     status,
 )
 from dlt_framework.core.monitoring.status import COLUMNS as STATUS_COLUMNS
-from dlt_framework.core.notify import summarise
 from dlt_framework.core.pipeline import Pipeline, install_for
-from dlt_framework.core.run import BackfillRun, IncrementalRun
+from dlt_framework.core.run import BackfillRun, IncrementalRun, Run
 from dlt_framework.core.settings import LoggingSettings, RunSettings
 
 LOGGER = logging.getLogger(__name__)
@@ -45,11 +47,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         Pipeline.discover(args.package)
-        args.command(args)
+        return args.command(args) or 0
     except (Exception, KeyboardInterrupt) as error:
-        _log_failure(args, error)
+        _log_failure(_target(args), error)
         return exit_code(error)
-    return 0
 
 
 def _list(args: argparse.Namespace) -> None:
@@ -99,15 +100,45 @@ def _readiness() -> None:
     _print(rows, ("pipeline", "ready", "install"))
 
 
-def _run(args: argparse.Namespace) -> None:
-    definition = Pipeline.get(args.pipeline)
-    _log_success(args, IncrementalRun(definition, args.resource, args.allow_initial_load)())
+def _run(args: argparse.Namespace) -> int:
+    return _each(args, lambda d: IncrementalRun(d, args.resource, args.allow_initial_load))
 
 
-def _backfill(args: argparse.Namespace) -> None:
-    definition = Pipeline.get(args.pipeline)
-    run = BackfillRun(definition, args.resource, _ranges(definition, args))
-    _log_success(args, run())
+def _backfill(args: argparse.Namespace) -> int:
+    return _each(args, lambda d: BackfillRun(d, args.resource, _ranges(d, args)))
+
+
+def _each(args: argparse.Namespace, run_for: Callable[[Pipeline], Run]) -> int:
+    """Each named pipeline at once, one thread each; the exit code of the first named to fail.
+
+    Every run is built before any starts, so a configuration mistake stops them all before
+    anything is extracted. One failing does not stop the others. Signals are taken on the main
+    thread, as dlt needs for threads: the first SIGINT or SIGTERM stops each run at its next step
+    with its package kept, a second stops the process.
+    """
+    names = list(dict.fromkeys(args.pipelines))
+    stated = [f"--{option.replace('_', '-')}" for option in args.one_pipeline if vars(args)[option]]
+    if len(names) > 1 and stated:
+        raise ConfigurationError(f"{', '.join(stated)} apply to one pipeline: name only that one")
+    runs = {name: run_for(Pipeline.get(name)) for name in names}
+    with signals.intercepted_signals(), ThreadPoolExecutor(len(runs)) as pool:
+        futures = {name: pool.submit(_outcome, run) for name, run in runs.items()}
+    code = 0
+    for name, future in futures.items():
+        outcome = future.result()
+        if isinstance(outcome, Counter):
+            _log_success(f"{args.name} {name}", outcome)
+        else:
+            _log_failure(f"{args.name} {name}", outcome)
+            code = code or exit_code(outcome)
+    return code
+
+
+def _outcome(run: Run) -> Counter[str] | BaseException:
+    try:
+        return run()
+    except (Exception, KeyboardInterrupt) as error:
+        return error
 
 
 def _ranges(
@@ -177,23 +208,32 @@ def _print(rows: list[dict[str, Any]], columns: Sequence[str]) -> None:
         print(pl.DataFrame(rows, schema=schema).fill_null("-"))
 
 
-def _log_success(args: argparse.Namespace, rows: Counter[str]) -> None:
+def summarise(rows: Mapping[str, int]) -> str:
+    """``carts=208, users=208``, or ``no rows``."""
+    return ", ".join(f"{table}={count}" for table, count in sorted(rows.items())) or "no rows"
+
+
+def _target(args: argparse.Namespace) -> str:
+    """``run shop erp``: the command and the pipelines it names."""
+    names = getattr(args, "pipelines", None) or [getattr(args, "pipeline", None) or ""]
+    return " ".join([args.name, *names]).strip()
+
+
+def _log_success(target: str, rows: Counter[str]) -> None:
     LOGGER.info(
-        "%s %s succeeded: %s",
-        args.name,
-        args.pipeline,
+        "%s succeeded: %s",
+        target,
         summarise(rows),
         extra={"event": "run_succeeded", "rows": rows.total()},
     )
 
 
-def _log_failure(args: argparse.Namespace, error: BaseException) -> None:
+def _log_failure(target: str, error: BaseException) -> None:
     """One line saying what failed and where, then the root cause's traceback.
 
     A framework error raised by the framework itself is its own explanation and has no traceback;
     anything else, including an unexpected bug (exit 1), keeps one.
     """
-    target = f"{args.name} {getattr(args, 'pipeline', None) or ''}".strip()
     if isinstance(error, KeyboardInterrupt):
         LOGGER.warning("%s interrupted", target, extra={"event": "run_interrupted"})
         return
@@ -229,8 +269,10 @@ def _parser() -> argparse.ArgumentParser:
     status_.add_argument("pipeline", nargs="?", help="one pipeline; all when omitted")
     resource_help = "only this resource; repeat for several"
 
+    pipelines_help = "one or more; several run at once, in this process"
     run = command("run", _run, "load from the stored incremental cursors")
-    run.add_argument("pipeline")
+    run.set_defaults(one_pipeline=("resource", "allow_initial_load"))
+    run.add_argument("pipelines", nargs="+", metavar="pipeline", help=pipelines_help)
     run.add_argument("--resource", action="append", help=resource_help)
     run.add_argument(
         "--allow-initial-load",
@@ -239,7 +281,8 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     backfill = command("backfill", _backfill, "load history as declared by each resource")
-    backfill.add_argument("pipeline")
+    backfill.set_defaults(one_pipeline=("resource",))  # --from and --to need one --resource
+    backfill.add_argument("pipelines", nargs="+", metavar="pipeline", help=pipelines_help)
     backfill.add_argument("--resource", action="append", help=resource_help)
     backfill.add_argument("--from", dest="start", help="first window edge, e.g. a logged end")
     backfill.add_argument("--to", dest="end", help="stop before this edge")

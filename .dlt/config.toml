@@ -7,7 +7,7 @@
 #   [pipelines.acme_shop.retry]
 #   give_up_after_s = 3600
 #
-# Secrets (monitoring.uri, webhook urls, credentials) go in .dlt/secrets.toml or the environment.
+# Secrets (monitoring.uri, credentials) go in .dlt/secrets.toml or the environment.
 
 [logging]
 format = "text"   # text | json (any registered log format)
@@ -36,19 +36,13 @@ flush_every_s = 60
 # source and this host.
 future_cursor_tolerance_s = 3600
 
-[notifications]
-on = ["failed"]   # failed | succeeded
-channels = []     # names of [notifications.<channel>] sections, e.g. ["ops"]
-# [notifications.ops]
-# kind = "webhook"  # notifications.ops.url is a secret
-
 # ---- dlt -------------------------------------------------------------------------------------
 
 [runtime]
 # dlt speaks only when something is wrong; the framework logs progress and writes monitoring
 # frames. Its lines go through the framework's handler, so [logging] format controls every line.
 log_level = "WARNING"
-# dlt's HTTP client (REST sources, webhooks) retries each request itself before a step fails.
+# dlt's HTTP client (REST sources) retries each request itself before a step fails.
 request_max_attempts = 5
 request_backoff_factor = 1
 request_max_retry_delay = 300

@@ -18,7 +18,8 @@ class ResourceSampler:
     Memory is the process RSS; the limit is the container's cgroup limit, never host RAM, so
     ``rss_mb / memory_limit_mb`` is how close the run is to an OOM kill. CPU is the percentage of
     one core averaged over the interval (four busy cores read 400). The first sample comes one
-    interval in, and a last one is taken on exit, so every run has at least one.
+    interval in, and a last one is taken on exit, so every run has at least one. Both are this
+    process's: pipelines running in one process share them. ``cpu_seconds`` counts from entry.
     """
 
     def __init__(self, interval_s: float, on_sample: Callable[[float, float], None]) -> None:
@@ -26,11 +27,13 @@ class ResourceSampler:
         self.on_sample = on_sample
         self.peak_rss_mb = 0.0
         self._process = psutil.Process()
+        self._cpu_at_start = 0.0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="resource-sampler", daemon=True)
 
     def __enter__(self) -> Self:
         self._process.cpu_percent()  # first call only primes the measurement
+        self._cpu_at_start = self._cpu_used()
         self._thread.start()
         return self
 
@@ -52,6 +55,10 @@ class ResourceSampler:
 
     @property
     def cpu_seconds(self) -> float:
+        """CPU time used since sampling started."""
+        return self._cpu_used() - self._cpu_at_start
+
+    def _cpu_used(self) -> float:
         times = self._process.cpu_times()
         return float(times.user + times.system)
 

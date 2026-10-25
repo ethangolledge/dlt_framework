@@ -7,12 +7,12 @@ queue, another warehouse) is one ``Sink`` subclass registered with ``@sinks.regi
 
 import uuid
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, ClassVar, Self
 from urllib.parse import urlparse
 
 import polars as pl
 import sqlalchemy as sa
+from fsspec.core import url_to_fs
 
 from dlt_framework.core.config import Registry
 from dlt_framework.core.monitoring.records import Record
@@ -48,41 +48,44 @@ sinks: Registry[Sink] = Registry("monitoring sink scheme")
 class ParquetSink(Sink):
     """Immutable Parquet files under ``{root}/{name}/``: local folders and object storage.
 
-    One file per write means no read-modify-write and no races between pipelines.
+    One file per write means no read-modify-write and no races between pipelines. Both go
+    through fsspec, so a local folder and a bucket take the same path; bucket credentials come
+    from the environment (e.g. ``AWS_ACCESS_KEY_ID``), as fsspec and Polars read them.
     """
 
     def __init__(self, root: str) -> None:
-        self.root = root.rstrip("/")
+        self.fs, self.root = url_to_fs(root.rstrip("/"))
 
     @classmethod
     def from_uri(cls, uri: str) -> Self:
-        return cls(uri.removeprefix("file://"))
+        return cls(uri)
 
     def write(self, name: str, frame: pl.DataFrame) -> None:
-        path = f"{self.root}/{name}/{uuid.uuid4().hex}.parquet"
-        if "://" not in path:  # object stores have no folders to create
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        frame.write_parquet(path)
+        folder = f"{self.root}/{name}"
+        self.fs.makedirs(folder, exist_ok=True)  # a no-op on object storage
+        with self.fs.open(f"{folder}/{uuid.uuid4().hex}.parquet", "wb") as file:
+            frame.write_parquet(file)
 
     def read(self, record: type[Record]) -> pl.DataFrame:
-        folder = f"{self.root}/{record.name}"
-        if "://" not in folder and not any(Path(folder).glob("*.parquet")):
+        files = self.fs.glob(f"{self.root}/{record.name}/*.parquet")
+        if not files:
             return record.frame([])
         # Files written before a column existed read it as null.
         return pl.scan_parquet(
-            f"{folder}/*.parquet",
+            [self.fs.unstrip_protocol(file) for file in files],
             schema=record.schema(),
             missing_columns="insert",
             extra_columns="ignore",
         ).collect()
 
 
-@sinks.register("postgresql", "postgres", "mssql", "mysql", "sqlite")
+@sinks.register("postgresql", "postgres", "mssql", "sqlite")
 class DatabaseSink(Sink):
-    """Appends to tables in any SQLAlchemy database; tables are created from the frame schema.
+    """Appends to tables in Postgres (the ``postgres`` extra), SQL Server (``mssql``), or SQLite.
 
-    ``postgres://`` and ``postgresql://`` without a driver use psycopg2, the driver dlt installs
-    for its Postgres destination (SQLAlchemy 2.1 would otherwise pick psycopg 3).
+    Tables are created from the frame schema, and a column a newer record adds is added to the
+    table before rows are written. A URL without a driver uses the one its extra installs:
+    psycopg2 for Postgres (SQLAlchemy 2.1 would otherwise pick psycopg 3), pymssql for SQL Server.
     """
 
     _TYPES: ClassVar[dict[type[pl.DataType], sa.types.TypeEngine[Any]]] = {
@@ -95,6 +98,7 @@ class DatabaseSink(Sink):
     _DEFAULT_DRIVERS: ClassVar[dict[str, str]] = {
         "postgres": "postgresql+psycopg2",
         "postgresql": "postgresql+psycopg2",
+        "mssql": "mssql+pymssql",
     }
 
     def __init__(self, uri: str) -> None:
@@ -112,6 +116,14 @@ class DatabaseSink(Sink):
         table = sa.Table(name, sa.MetaData(), *columns)
         with self.engine.begin() as connection:
             table.create(connection, checkfirst=True)
+            existing = {column["name"] for column in sa.inspect(connection).get_columns(name)}
+            quote = connection.dialect.identifier_preparer.quote
+            for column in columns:
+                if column.name not in existing:  # ADD without COLUMN: every dialect here takes it
+                    kind = column.type.compile(dialect=connection.dialect)
+                    connection.execute(
+                        sa.text(f"ALTER TABLE {quote(name)} ADD {quote(column.name)} {kind}")
+                    )
             if frame.height:
                 connection.execute(table.insert(), frame.to_dicts())
 

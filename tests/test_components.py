@@ -7,6 +7,7 @@ from dlt_framework.core import (
     Append,
     AwareDatetime,
     DateOnly,
+    DuckDb,
     Duration,
     Integer,
     IsoTimestamp,
@@ -17,7 +18,6 @@ from dlt_framework.core import (
     RowBackfill,
     RowVersion,
     Strftime,
-    Target,
     TimeBackfill,
     TimeCursor,
     UnixMillis,
@@ -113,6 +113,20 @@ def test_backfill_must_match_cursor_and_start_before_it() -> None:
 
 
 @pytest.mark.parametrize(
+    "define",
+    [
+        lambda: RowBackfill(size=0),
+        lambda: ValueBackfill(start=0, every=-5),
+        lambda: Duration(0, "days"),
+        lambda: TimeBackfill(start=datetime(2025, 1, 1), every=Duration(1, "days")),
+    ],
+)
+def test_a_backfill_that_could_never_advance_is_refused(define) -> None:
+    with pytest.raises(DefinitionError):
+        define()
+
+
+@pytest.mark.parametrize(
     ("window", "text"),
     [
         (
@@ -159,7 +173,7 @@ def test_pipeline_names_are_unique_and_cannot_mimic_backfills() -> None:
         return Pipeline(
             name=name,
             source=CustomSource(name="s", resources={}),
-            target=Target("duckdb", dataset="raw"),
+            target=DuckDb(dataset="raw"),
             schema_contract=FREEZE_DATA_TYPES,
         )
 

@@ -10,7 +10,7 @@ from dlt.sources.rest_api.typing import ClientConfig, EndpointResource, Endpoint
 from dlt_framework.core.backfill import RowBackfill
 from dlt_framework.core.errors import DefinitionError
 from dlt_framework.core.resource import Resource
-from dlt_framework.core.source import Source
+from dlt_framework.core.source import Extraction, Source
 from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow, Window
 
 _FRAMEWORK_KEYS = ("start_param", "end_param", "offset_param", "limit_param")
@@ -42,8 +42,9 @@ class RestApiSource(Source[dict[str, Any]]):
             )
 
     def resource(
-        self, resource: Resource, config: dict[str, Any], window: Window | None
+        self, resource: Resource, config: dict[str, Any], extraction: Extraction
     ) -> DltResource:
+        window = extraction.window
         endpoint = {key: value for key, value in config.items() if key not in _FRAMEWORK_KEYS}
         params = endpoint["params"] = dict(endpoint.get("params", {}))
         settings = resource.cursor.settings(window) if resource.cursor else None

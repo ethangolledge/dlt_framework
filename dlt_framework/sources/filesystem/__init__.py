@@ -1,3 +1,10 @@
-from dlt_framework.sources.filesystem.source import Files, FilesystemSource
+from dlt_framework.sources.filesystem.source import (
+    Csv,
+    Files,
+    FilesystemSource,
+    Jsonl,
+    Parquet,
+    Reader,
+)
 
-__all__ = ["Files", "FilesystemSource"]
+__all__ = ["Csv", "Files", "FilesystemSource", "Jsonl", "Parquet", "Reader"]
