@@ -12,6 +12,11 @@ class WriteMode(ABC):
     def hints(self) -> dict[str, Any]:
         """Keyword arguments for ``DltResource.apply_hints``."""
 
+    def split_problem(self) -> str | None:
+        """Why loading the rows in several consecutive loads would land a different table than
+        one load, or ``None`` when it would not."""
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class Append(WriteMode):
@@ -27,6 +32,9 @@ class Replace(WriteMode):
 
     def hints(self) -> dict[str, Any]:
         return {"write_disposition": "replace"}
+
+    def split_problem(self) -> str | None:
+        return "each load replaces the table, so only the last would be kept"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -45,3 +53,8 @@ class Merge(WriteMode):
             "write_disposition": {"disposition": "merge", "strategy": self.strategy},
             "primary_key": list(self.primary_key),
         }
+
+    def split_problem(self) -> str | None:
+        if self.strategy == "scd2":
+            return "scd2 retires every row missing from a load"
+        return None

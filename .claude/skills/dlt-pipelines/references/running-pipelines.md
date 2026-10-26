@@ -48,7 +48,8 @@ Rules:
 
 Both run types call the same spine, `Run.__call__` in `dlt_framework/core/run.py`:
 sync → drain pending packages → `check` → for each unit, for each window: build → extract →
-empty policy → normalize → load, stopping a unit early when `window.is_last(rows)`. They differ
+empty policy → normalize → load, stopping a unit early when `window.is_last(rows)`, or, for a
+chunked resource's windows of `None`, once a chunk ends before its limit. They differ
 only in class attributes and the `units` / `check` hooks:
 
 | | `IncrementalRun` | `BackfillRun` |
@@ -56,11 +57,11 @@ only in class attributes and the `units` / `check` hooks:
 | Command | `pipeline run NAME [NAME ...] [--resource R ...] [--allow-initial-load]` | `pipeline backfill NAME [NAME ...] [--resource R ...] [--from X] [--to Y] [--missing]` |
 | dlt pipeline name | `NAME` | `NAME__backfill` |
 | Dataset / tables | `Target.dataset` | same dataset, same tables |
-| Units | one: the selected resources, window `None` (resume from stored cursor) | one per selected resource with a declared `backfill`, over its windows (narrowed by `--from/--to`, or the gaps for `--missing`) |
+| Units | one: the selected resources, window `None` (resume from stored cursor); plus one per `chunk` resource, repeating window `None` until a chunk ends short | one per selected resource with a declared `backfill`, over its windows (narrowed by `--from/--to`, or the gaps for `--missing`) |
 | Incremental state | read and advanced | untouched: time/value windows set `end_value` (mock state); row windows apply no cursor |
 | Resume after interruption | automatic (dlt state; a kept package loads first) | stateless: `pipeline backfill NAME --missing` (coverage from the `loads` frame) |
 | Staging dataset | `<dataset>_staging_run_<pipeline>` | `<dataset>_staging_backfill_<pipeline>` |
-| Empty policy | enforced | not enforced (an empty chunk is normal; a short row page ends the unit) |
+| Empty policy | enforced (on a chunked resource's first chunk) | not enforced (an empty chunk is normal; a short row page ends the unit) |
 | `check` hook | future-cursor guard (G8), lost-state guard (G3) | none |
 
 Never load history through `run`: no lowering a cursor `start`, no `refresh=`, no `dev_mode`, no
@@ -80,6 +81,12 @@ Never load history through `run`: no lowering a cursor `start`, no `refresh=`, n
 
 A source type lists the window kinds it can push upstream (`Source.windows`). Declaring a backfill
 it cannot push fails at definition time.
+
+A large increment (a batch job rewriting millions of rows) needs no backfill: give the resource
+`chunk=N` and `row_order="asc"` on its cursor. Each chunk commits its rows and cursor before the
+next, so one run loads the change as consecutive bounded loads, and a failure keeps the chunks
+before it. `Resource` refuses a chunk that would skip or repeat rows (`lag`, null cursors
+included, `Replace`, `scd2`).
 
 Write mode is always your stated choice. Replaying a backfill chunk is idempotent with `Merge`; an
 `Append` resource duplicates replayed rows.

@@ -14,15 +14,19 @@ format = "text"   # text | json (any registered log format)
 level = "INFO"
 
 [retry]
-# A failing step (sync, extract, normalize, load) is retried while dlt deems the error transient,
-# with jittered exponential waits from initial_wait_s up to max_wait_s. It gives up after
-# `attempts`, or once give_up_after_s has passed: size that to the longest outage of a database
-# or API that a run should ride out. Terminal errors (bad credentials, schema contract) and
-# MemoryError are never retried.
-attempts = 8
+# A failing step (sync, extract, normalize, load) is retried only for errors known to heal (the
+# network, a busy or restarting database), with jittered exponential waits from initial_wait_s up
+# to max_wait_s, giving up after `attempts` or once give_up_after_s has passed. Anything else
+# fails at once: bad credentials, a schema contract, out of memory, an unknown error.
+#
+# This only rides out a blip. Longer outages are the scheduler's: the run exits 4, keeps its
+# extracted package, and the next run loads it without extracting again. Under an orchestrator
+# that retries exit 4 itself, set attempts = 1, so no container is billed while it waits; then
+# keep DLT_DATA_DIR on persistent storage, or the retry extracts again. Never retry exits 2, 3, or 5.
+attempts = 3
 initial_wait_s = 5
-max_wait_s = 120
-give_up_after_s = 900
+max_wait_s = 60
+give_up_after_s = 120
 
 [monitoring]
 # Memory and CPU are sampled every sample_every_s and written every flush_every_s, so a run
@@ -67,6 +71,9 @@ start_method = "spawn"
 # already uses `threads` cores, so parallel jobs add memory, not speed (five large merges at once
 # were OOM-killed at ~7.4 GB). Raise it for Postgres.
 workers = 1
+# A job failing transiently (a deadlock, a dropped connection) is retried this many times within
+# the load before the step fails; every framework retry of the step multiplies it.
+raise_on_max_retries = 2
 raise_on_failed_jobs = true
 delete_completed_jobs = true
 truncate_staging_dataset = true

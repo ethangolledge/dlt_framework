@@ -85,12 +85,14 @@ class Files:
     """Where a resource's files are and how to read them.
 
     ``bucket_url`` is e.g. ``s3://bucket/prefix`` or ``file:///data/in``; credentials resolve from
-    ``sources.filesystem.credentials``.
+    ``sources.filesystem.credentials``. Files are listed ``files_per_page`` at a time, which is
+    also the smallest step of a chunked resource.
     """
 
     bucket_url: str
     file_glob: str
     reader: Reader
+    files_per_page: int = 100
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -125,7 +127,11 @@ class FilesystemSource(Source[Files]):
         return f"{self._listing_name(resource)}_{resource.name}"
 
     def resource(self, resource: Resource, config: Files, extraction: Extraction) -> DltResource:
-        listing = filesystem(bucket_url=config.bucket_url, file_glob=config.file_glob)
+        listing = filesystem(
+            bucket_url=config.bucket_url,
+            file_glob=config.file_glob,
+            files_per_page=config.files_per_page,
+        )
         listing = listing.with_name(self._listing_name(resource))
         if resource.cursor is not None:
             listing.apply_hints(incremental=resource.cursor.incremental(extraction.window))

@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 
 import dlt
 from dlt.extract.incremental import Incremental
+from dlt.extract.items_transform import LimitItem
 from dlt.extract.resource import DltResource
 from dlt.extract.source import DltSource
 
@@ -15,6 +16,23 @@ from dlt_framework.core.resource import Resource
 from dlt_framework.core.windows import Window
 
 ConfigT = TypeVar("ConfigT")
+
+
+class Chunk(LimitItem):
+    """Stops a resource once ``rows`` new rows have passed dlt's incremental filter.
+
+    It is dlt's ``add_limit(count_rows=True)``, except that it is never pushed into the upstream
+    request (``sql_table`` would add ``LIMIT``). The closed start of each chunk re-reads the rows
+    sharing the cursor's last value, and dlt drops them as already loaded: counted upstream, they
+    could fill a chunk and leave the cursor where it was.
+    """
+
+    def __init__(self, rows: int) -> None:
+        super().__init__(max_items=rows, max_time=None, count_rows=True)
+        self.exhausted = False
+
+    def limit(self, chunk_size: int) -> None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +45,7 @@ class Extraction:
 
     window: Window | None
     _committed: list[Callable[[], None]] = field(default_factory=list)
+    _chunks: list[Chunk] = field(default_factory=list)
 
     def after_commit(self, callback: Callable[[], None]) -> None:
         """Call ``callback`` once this extract's rows are committed; never after a failure."""
@@ -35,6 +54,21 @@ class Extraction:
     def committed(self) -> None:
         for callback in self._committed:
             callback()
+
+    def chunk(self, resource: DltResource, rows: int) -> None:
+        """Stop ``resource`` after ``rows`` new rows, on the pipe that holds its cursor: the
+        head of the pipe, such as a file listing rather than its reader, so files are read
+        whole."""
+        pipe = resource._pipe
+        while pipe.has_parent:
+            pipe = pipe.parent
+        self._chunks.append(chunk := Chunk(rows))
+        pipe.append_step(chunk)
+
+    @property
+    def cut(self) -> bool:
+        """Whether a chunk stopped its resource before upstream ran out, so more may follow."""
+        return any(chunk.exhausted for chunk in self._chunks)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -118,4 +152,6 @@ class Source(ABC, Generic[ConfigT]):
         dlt_resource.apply_hints(**resource.write.hints())
         if resource.cursor is not None:
             resource.cursor.prepare(dlt_resource)
+        if resource.chunk is not None and extraction.window is None:
+            extraction.chunk(dlt_resource, resource.chunk)
         return dlt_resource

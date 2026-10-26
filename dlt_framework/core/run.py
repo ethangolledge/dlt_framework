@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from itertools import chain
+from itertools import chain, repeat
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Any, ClassVar, Self, TypeVar
@@ -81,7 +81,8 @@ class Run(ABC):
         """Resources to extract together, and the windows to extract them over.
 
         A window of ``None`` means "from stored state". A unit stops early when a window reports
-        ``is_last`` for the rows it extracted.
+        ``is_last`` for the rows it extracted, or, on windows of ``None``, once no chunk cut its
+        resource short.
         """
 
     def check(self, pipeline: dlt.Pipeline) -> None:  # noqa: B027 - optional hook
@@ -106,10 +107,12 @@ class Run(ABC):
                 with PipelineLock(pipeline.pipelines_dir, self.name):
                     self._prepare(pipeline)
                     for resources, windows in self.units():
-                        for window in windows:
-                            loaded = self._load(pipeline, resources, window, monitor)
+                        for index, window in enumerate(windows):
+                            loaded, more = self._load(
+                                pipeline, resources, window, monitor, first=index == 0
+                            )
                             rows.update(loaded)
-                            if window is not None and window.is_last(sum(loaded.values())):
+                            if not more:
                                 break
             except BaseException as error:
                 monitor.finished(rows.total(), error)
@@ -142,7 +145,10 @@ class Run(ABC):
         resources: tuple[Resource, ...],
         window: Window | None,
         monitor: Monitor,
-    ) -> Counter[str]:
+        first: bool,
+    ) -> tuple[Counter[str], bool]:
+        """One extract, normalize, and load, committed; returns the rows loaded and whether the
+        unit continues: the window is not the last, or a chunk stopped before upstream ran out."""
         timings: dict[str, float] = {}
         try:
             info, extraction = self._timed(
@@ -151,7 +157,7 @@ class Run(ABC):
             with self._kept_or_discarded(pipeline):
                 (load_id,) = info.loads_ids  # one source extracted, so one package
                 rows = self._row_counts(info, resources)
-                self._check_extracted(pipeline, resources, rows)
+                self._check_extracted(pipeline, resources, rows, first)
                 self._timed(timings, "normalize", pipeline.normalize)
                 self._timed(timings, "load", lambda: self._loading(pipeline.load))
             extraction.committed()
@@ -164,7 +170,9 @@ class Run(ABC):
             cursor = stored_cursor(pipeline, self.definition.source, resource)
             monitor.loaded(resource, window, load_id, rows[resource.name], timings, cursor)
         LOGGER.info("Loaded %s: %s", window or "increment", dict(rows), extra=self._log())
-        return rows
+        if window is None:
+            return rows, extraction.cut
+        return rows, not window.is_last(sum(rows.values()))
 
     def _extract(
         self, pipeline: dlt.Pipeline, resources: tuple[Resource, ...], window: Window | None
@@ -198,11 +206,17 @@ class Run(ABC):
             raise
 
     def _check_extracted(
-        self, pipeline: dlt.Pipeline, resources: Iterable[Resource], rows: Counter[str]
+        self,
+        pipeline: dlt.Pipeline,
+        resources: Iterable[Resource],
+        rows: Counter[str],
+        first: bool,
     ) -> None:
-        """Guards between extract and load, while nothing is committed yet."""
+        """Guards between extract and load, while nothing is committed yet. The empty policy
+        applies to a unit's first load: a later chunk is empty when the one before it ended at
+        upstream's last row."""
         self._check_cursors(pipeline, resources, "extract")
-        if not self.enforce_empty:
+        if not self.enforce_empty or not first:
             return
         for resource in resources:
             if rows[resource.name] or resource.empty == "allow":
@@ -267,7 +281,11 @@ class Run(ABC):
 
 
 class IncrementalRun(Run):
-    """Loads resources from their stored cursors under the production pipeline name."""
+    """Loads resources from their stored cursors under the production pipeline name.
+
+    Resources extract together in one load. A resource with a ``chunk`` loads on its own
+    afterwards, in consecutive chunks, until one ends before its limit.
+    """
 
     mode = "run"
 
@@ -281,7 +299,12 @@ class IncrementalRun(Run):
         self.allow_initial_load = allow_initial_load
 
     def units(self) -> Iterable[Unit]:
-        return [(self.resources, (None,))]
+        whole = tuple(resource for resource in self.resources if resource.chunk is None)
+        chunked = [(resource,) for resource in self.resources if resource.chunk is not None]
+        return [
+            *([(whole, (None,))] if whole else []),
+            *((resources, repeat(None)) for resources in chunked),
+        ]
 
     def check(self, pipeline: dlt.Pipeline) -> None:
         """Refuse a cursor already stored ahead of now, and a cursor restarting from its start

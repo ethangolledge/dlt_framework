@@ -70,7 +70,7 @@ Everything that decides what lands is a required argument; nothing defaults.
 | --- | --- |
 | `Pipeline(name, source, target, schema_contract)` | Unique, permanent name = dlt state key. Each table has one owning pipeline. |
 | Target | `DuckDb(dataset=...)`, `Postgres(dataset=...)`; credentials from dlt env vars / `.dlt/secrets.toml` |
-| `Resource(name, write, cursor, empty, backfill=None)` | One stream of rows into one table |
+| `Resource(name, write, cursor, empty, backfill=None, chunk=None)` | One stream of rows into one table; `chunk` loads a large increment in bounded parts (Performance and scaling) |
 | Write mode | `Append()`, `Replace()`, `Merge(primary_key=..., strategy=...)` |
 | Cursor | `TimeCursor(path, start, format, on_missing)`, `ValueCursor(path, start, format, on_missing)`, or `None` |
 | Time format | `IsoTimestamp`, `Strftime`, `UnixSeconds`, `UnixMillis`, `DateOnly`, `AwareDatetime`, `NaiveDatetime` |
@@ -237,8 +237,9 @@ pipeline status [NAME]                                    last runs, cursors, ba
 - **SQL backends.** `SqlSource(backend=...)` is required:
   - `PyArrow()` keeps exact types and runs 20–30× faster than `SqlAlchemy()`.
   - `ConnectorX()` is the fastest, with costs: it reads whole results into memory (it ignores
-    `chunk_size`) and drops timezones from tz-aware timestamps. The framework rejects it with a
-    tz-aware time cursor, and derives its connection string from the credentials.
+    `chunk_size`) unless `backend_kwargs={"return_type": "arrow_stream"}`, and drops timezones
+    from tz-aware timestamps. The framework rejects it with a tz-aware time cursor, or with a
+    `chunk` while not streaming, and derives its connection string from the credentials.
   - Install it with the `connectorx` extra.
 - **Extract.** A source's resources always extract in parallel threads; `[extract] workers` sets
   how many, and `[sources.<name>.extract] workers = 1` serialises a rate-limited upstream. One
@@ -246,6 +247,22 @@ pipeline status [NAME]                                    last runs, cursors, ba
 - **Normalize and load.** `[data_writer] file_max_items` rotates files so a large table spreads
   across normalize processes and load jobs. Normalize workers start with `spawn`: forking a
   process that runs threads can deadlock.
+- **Large increments.** `Resource(chunk=N)` loads a big change as consecutive loads of about N
+  new rows each (files, for a filesystem source). Each chunk commits its rows and cursor before
+  the next starts, so memory, the size of each merge, and what a failure costs are bounded by N,
+  not by how much changed upstream. A failed chunk keeps the chunks before it, and the next run
+  resumes after them. This works for every source type and cursor format.
+  - **Cursor order.** The cursor needs `row_order="asc"`: SQL sources add `ORDER BY` on the
+    cursor and filesystem sources sort the listing; any other upstream must already return rows
+    in that order.
+  - **What it refuses.** `pipeline check` rejects a chunked resource that would skip or repeat
+    rows: one with `lag`, null cursors included, `Replace`, or an `scd2` merge.
+  - **How runs change.** A chunked resource loads on its own, after the pipeline's other
+    resources. Only its first chunk is held to its empty policy. Backfills ignore `chunk`, since
+    their windows already bound each load.
+  - **Sizing.** A chunk ends with the page or batch that reaches N, so size N in multiples of the
+    source's page (`chunk_size`, a REST page, `Files(files_per_page=...)`). Index the cursor
+    column upstream: every chunk is an ordered read from the last value.
 - **Large backfills.** Use a `ValueBackfill` on an id or rowversion. `RowBackfill` pages with
   `OFFSET`, which re-reads earlier rows on every page.
 - **Scaling out.** Every command acts on one pipeline, so each pipeline is its own process or
@@ -262,7 +279,7 @@ Exit codes:
 | `2` | definition, configuration, or guard refusal |
 | `3` | terminal failure |
 | `4` | transient retries exhausted |
-| `5` | out of memory (Python `MemoryError`, never retried) |
+| `5` | out of memory (Python `MemoryError`, or the database's own limit; never retried) |
 | `130` | interrupted |
 | `137` | not raised by the framework: Docker or the kernel OOM-killed the container (see Monitoring) |
 
@@ -278,8 +295,15 @@ ERROR dlt_framework.cli: run acme_shop failed in extract of orders, window time 
 - **Secrets are masked.** The handler masks URL passwords and query-string values
   (`?api_key=***`) in every line, tracebacks included. Monitoring `error_message` is masked the
   same way.
-- **Unknown errors exit 4, not 3.** dlt treats any error it doesn't recognise as transient, so it
-  is retried before it fails.
+- **Only errors known to heal are retried.** The network, a busy or restarting database, and
+  what dlt's destinations mark transient are retried briefly (`[retry]`), then exit 4. Anything
+  else fails at once: bad credentials and schema contracts exit 3, a missing secret exits 2, and
+  out of memory exits 5. An unknown error is treated as a bug and exits 3.
+- **Retries belong to the scheduler.** The in-process retry only rides out a blip. Retry exit 4
+  from the scheduler, never 2, 3 or 5. A run that failed after extracting keeps its package, and
+  the next run loads it before extracting anything new. Under an orchestrator that retries for you,
+  set `RETRY__ATTEMPTS=1` so no container waits out a backoff, and keep `DLT_DATA_DIR` persistent,
+  or the retry extracts again.
 
 ## Monitoring
 

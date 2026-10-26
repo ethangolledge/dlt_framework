@@ -30,8 +30,9 @@ class Backend(ABC):
         """Modules it imports when it reads, mapped to the extra that installs them."""
         return {}
 
-    def validate(self, resource: Resource) -> None:  # noqa: B027 - optional hook
-        """Refuse a resource this backend would read wrongly."""
+    def validate(self, resource: Resource, config: dict[str, Any]) -> None:  # noqa: B027
+        """Refuse a resource this backend would read wrongly; ``config`` is its ``sql_table``
+        options."""
 
     def backend_kwargs(self, credentials: Any) -> dict[str, Any]:
         """``sql_table`` ``backend_kwargs`` it needs; a resource's own override these."""
@@ -58,16 +59,22 @@ class PyArrow(Backend):
 @dataclass(frozen=True, slots=True)
 class ConnectorX(Backend):
     """Fastest (Rust, no SQLAlchemy), with costs: it ignores ``chunk_size`` (whole result in
-    memory), drops timezones from tz-aware timestamps, and reads its own URL scheme, derived here
-    from the credentials unless ``backend_kwargs={"conn": ...}`` is given. The ``connectorx``
-    extra."""
+    memory) unless ``backend_kwargs={"return_type": "arrow_stream"}``, drops timezones from
+    tz-aware timestamps, and reads its own URL scheme, derived here from the credentials unless
+    ``backend_kwargs={"conn": ...}`` is given. The ``connectorx`` extra."""
 
     name: ClassVar[TableBackend] = "connectorx"
 
     def requires(self) -> dict[str, str]:
         return {"connectorx": "connectorx", "pyarrow": "connectorx"}
 
-    def validate(self, resource: Resource) -> None:
+    def validate(self, resource: Resource, config: dict[str, Any]) -> None:
+        streams = config.get("backend_kwargs", {}).get("return_type") == "arrow_stream"
+        if resource.chunk is not None and not streams:
+            raise DefinitionError(
+                f"{resource.name!r}: connectorx reads the whole result at once, so a chunk "
+                "cannot bound it; set backend_kwargs={'return_type': 'arrow_stream'}"
+            )
         cursor = resource.cursor
         if isinstance(cursor, TimeCursor) and isinstance(cursor.format, AwareDatetime):
             raise DefinitionError(
@@ -107,7 +114,7 @@ class SqlSource(Source[dict[str, Any]]):
 
     def validate(self, resource: Resource, config: dict[str, Any]) -> None:
         super().validate(resource, config)
-        self.backend.validate(resource)
+        self.backend.validate(resource, config)
         if resource.cursor is not None and resource.cursor.fallbacks:
             raise DefinitionError(
                 f"{resource.name!r}: fallback cursors cannot become a WHERE clause; coalesce "
