@@ -31,6 +31,7 @@ Before adding any function, class, module, flag, or dependency:
    | Counting what the destination (and source) holds | `core/reconcile.py`; a source's own count is `Source.count` |
    | One log format for framework and dlt lines; fields bound to every line of a run (`logs.bound`) | `core/logs.py` |
    | The webhook fallback for alert events | `core/alerts.py` |
+   | The monitoring dashboard: facts from frames, ASCII primitives, pages, frontends | `dashboard/` (`model/`, `render/`, `pages/`, `app/`); never imported by `dlt_framework` |
    | Run spine, incremental vs backfill, guards, rollback after extract, staging layout, lock | `core/run.py` |
    | PDFs to rows: templates and locators, model fallback, OCR, disposal after load | `sources/filesystem/documents/` |
    | Opening folders and buckets with one credentials setting | `core/buckets.py` |
@@ -61,6 +62,8 @@ Dependency direction is `cli` → `sources` → `core`. Source types never impor
 | A new cursor or window kind | A `Cursor` / `Window` / `Backfill` subclass in `core/` | `if kind == ...` chains |
 | A new write behaviour (hard deletes, scd2 options) | A field on, or class beside, `Merge`/`Append`/`Replace` in `core/write.py` | Hints applied in adapters |
 | Alerting on a run's outcome | The orchestrator, per task, from the exit code and the `event` field of log lines; where there is none, the one generic webhook in `core/alerts.py`, configured by URL and body template | A channel for a named service (Telegram, Slack) in code |
+| A new dashboard page or panel | A function registered with `@page` in `dashboard/pages/`, drawing `model` facts with `render` primitives | Polars inside a page, or a frontend-specific chart |
+| A new dashboard frontend (Textual, another web framework) | One module in `dashboard/app/` calling `session.draw` | Pages or facts written for one frontend |
 | A new health signal | A rule in `core/monitoring/health.py` reading the frames, its threshold a `HealthSettings` field | A threshold checked inside a run |
 | A source that can count its rows | `Source.count(resource, window)` on its `Source` subclass | Counting in `core/reconcile.py` by source type |
 | A new document layout | A `Template` (with `Text`/`Table` locators) in the pipeline that reads it | A new extractor class per layout |

@@ -24,6 +24,7 @@ dlt_framework/
     custom/             CustomSource        (any Python generator)
     scrape/             ScrapeSource        (web pages through Scrapling spiders)
   cli.py                one entry point for every pipeline
+dashboard/              the monitoring dashboard: model, render, pages, app (terminal, web)
 ```
 
 Each source type owns its package: its adapter, its quirks, and the pipelines built on it
@@ -46,6 +47,7 @@ REST and custom source types; each destination and every other source type is an
 | `filesystem` | `FilesystemSource`: local folders and S3, CSV/JSONL/Parquet readers | medium |
 | `gcs` / `azure` | `gs://` / `az://` buckets for `FilesystemSource`, includes `filesystem` | medium |
 | `documents` | `Documents` reader for `FilesystemSource`: PDFs to rows, OCR for scans (LiteParse, Anthropic SDK) | small |
+| `dashboard` | `pipeline-dashboard serve`: the web app (Streamlit); `show` and `export` need nothing extra | medium |
 | `scrape` | `ScrapeSource`: Scrapling with its fetchers | large (~700 MB in the image: Scrapling's spiders import its browser automation packages even for plain HTTP) |
 
 ```bash
@@ -401,6 +403,44 @@ body = '{"chat_id": "<chat>", "text": "$level $pipeline $event: $message"}'
 Posting happens on a background thread, at most once per pipeline and event per `cooldown_s`, and
 a failed post is one line on stderr (never the URL) that never fails a run.
 
+## Dashboard
+
+`dashboard/` draws the monitoring frames as a terminal-styled, black-and-neon dashboard: box
+panels, sparklines, braille charts, gantt timelines, and heatmaps, every state a glyph as well
+as a colour. It reads the frames and nothing else (no pipeline code, destination, or dlt state),
+so it works for any pipeline and source type, wherever the frames can be read.
+
+```bash
+pipeline-dashboard show [PAGE] [--since 24h] [--pipeline P] [--run RUN]   # in the terminal
+pipeline-dashboard serve [--port 8501]                                   # web app (the dashboard extra)
+pipeline-dashboard export FOLDER [--since 7d]                            # static HTML, any web host
+pipeline-dashboard demo FOLDER                                           # a week of demo frames
+```
+
+Each command reads `MONITORING__URI` (as runs do), or `--uri`, or `--demo` for generated frames.
+
+| Page | Answers | When |
+| --- | --- | --- |
+| Mission control | KPIs against the period before, the run matrix, health now, each pipeline's trend | every morning |
+| Runs | A timeline of every run, what ran at once and its summed memory, the latest runs | "what happened overnight?" |
+| Run | One run: steps busy or waiting, memory by step against its limit, resources, tables, cursors, the error with its chain, input, and traceback, and the command to run next | on an alert |
+| Performance | Step time and CPU share per pipeline, duration by release, slow tables, which resource holds a load up, throughput, retries | after a release; weekly |
+| Capacity | Peak memory p50 to p99 against the limit, a recommended size, memory by step, CPU in use, daily headroom | before scaling; on OOM kills |
+| Completeness | Backfill coverage with the command for each gap, cursor holes, re-reads, and resets, reconciliation, windows loaded twice or empty | before trusting the data |
+| Failures | Failures by root cause and the line raised at, time to recover, every failed and lost run | patterns, not one-offs |
+| Profile | The functions a `--profile` run spent its time in, per step | a slow job you cannot explain |
+| Advisor | What to change, with its evidence: workers, splitting or chunking a resource, container memory, merge keys, backfills, recurring errors | weekly tuning |
+
+- **Layers**: `app` (frontends) → `pages` → `model` (frames to facts, Polars) and `render`
+  (primitives to styled text, encoded as HTML or ANSI) → `theme`. `lint-imports` enforces it,
+  and that the framework never imports the dashboard. A new frontend is one module in `app/`; a
+  new page is one function registered with `@page`.
+- **Dirty data is handled in `model/facts.py`**: duplicate records, older record shapes, runs with
+  no end (running until they outlive their pipeline's p99 duration, then lost, timed from their
+  last sample), empty ranges ("NO SIGNAL"), and UTC throughout.
+- **Health** uses `pipeline health`'s rules and this environment's `[health]` thresholds; where
+  none are stated, the panel says so.
+
 ## Scraping
 
 `ScrapeSource` (the `scrape` extra) loads web pages through [Scrapling](https://scrapling.readthedocs.io)
@@ -562,11 +602,11 @@ ephemeral runners.
 
 ```bash
 uv sync --all-extras                              # every extra plus the dev tools
-uv run ruff check dlt_framework tests
-uv run ruff format --check dlt_framework tests
+uv run ruff check dlt_framework dashboard tests
+uv run ruff format --check dlt_framework dashboard tests
 uv run lint-imports
-uv run mypy dlt_framework
-uv run pytest --cov=dlt_framework --cov-branch --cov-fail-under=90
+uv run mypy dlt_framework dashboard
+uv run pytest --cov=dlt_framework --cov=dashboard --cov-branch --cov-fail-under=90
 ```
 
 `TEST_POSTGRES_URL=postgresql://...` also runs the Postgres tests. Guidance for building and

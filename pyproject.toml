@@ -37,6 +37,7 @@ documents = ["anthropic>=2.3,<3", "liteparse~=2.17.0", "pydantic>=2.14,<3"]  # P
 
 [project.scripts]
 pipeline = "dlt_framework.cli:entrypoint"
+pipeline-dashboard = "dashboard.app.terminal:entrypoint"
 
 [dependency-groups]
 dev = [
@@ -51,6 +52,7 @@ dev = [
 
 [tool.uv.build-backend]
 module-root = ""
+module-name = ["dlt_framework", "dashboard"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -86,8 +88,28 @@ explicit_package_bases = true
 module = ["fsspec.*"]  # untyped; installed with dlt
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["streamlit.*"]  # the dashboard extra; checked against its types once installed
+ignore_missing_imports = true
+
 [tool.importlinter]
-root_package = "dlt_framework"
+root_packages = ["dlt_framework", "dashboard"]
+
+[[tool.importlinter.contracts]]
+name = "the framework never imports the dashboard"
+type = "forbidden"
+source_modules = ["dlt_framework"]
+forbidden_modules = ["dashboard"]
+
+[[tool.importlinter.contracts]]
+name = "dashboard: app -> pages -> model and render -> theme"
+type = "layers"
+layers = [
+    "dashboard.app",
+    "dashboard.pages",
+    "dashboard.model | dashboard.render",
+    "dashboard.theme | dashboard.units",
+]
 
 [[tool.importlinter.contracts]]
 name = "cli -> sources -> core; core never imports a source type"
