@@ -65,9 +65,11 @@ class ResourceSampler:
         return self.cpu_used() - self._cpu_at_start
 
     def cpu_used(self) -> float:
-        """This process's CPU time so far, all threads, user and system."""
+        """CPU time so far: this process's threads, and the child processes it has waited for,
+        such as dlt's normalize workers once their pool closes (user and system both)."""
         times = self._process.cpu_times()
-        return float(times.user + times.system)
+        children = getattr(times, "children_user", 0.0) + getattr(times, "children_system", 0.0)
+        return float(times.user + times.system + children)
 
     @staticmethod
     def host_memory_mb() -> float:

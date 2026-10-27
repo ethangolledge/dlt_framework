@@ -20,10 +20,10 @@ resource as it was defined for that run, and the latest row per id gives it as i
 """
 
 import types
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass, fields
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
-from typing import Any, ClassVar, Union, get_args, get_origin, get_type_hints
+from typing import Any, ClassVar, Protocol, Union, get_args, get_origin, get_type_hints
 
 import polars as pl
 
@@ -56,7 +56,8 @@ class Record:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PipelineRecord(Record):
-    """A pipeline's definition as of one run."""
+    """A pipeline's definition as of one run, and how many workers dlt resolved for each step
+    (null where dlt picks at run time, e.g. normalize workers from the CPU count)."""
 
     name: ClassVar[str] = "pipelines"
 
@@ -67,11 +68,15 @@ class PipelineRecord(Record):
     source: str
     destination: str
     dataset: str
+    extract_workers: int | None
+    normalize_workers: int | None
+    load_workers: int | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResourceRecord(Record):
-    """A resource's definition as of one run; ``definition`` is the full declaration."""
+    """A resource's definition as of one run; ``definition`` is the full declaration, and the
+    ``backfill_*`` columns its declared history, which coverage is measured against."""
 
     name: ClassVar[str] = "resources"
 
@@ -85,6 +90,9 @@ class ResourceRecord(Record):
     cursor_path: str | None
     cursor_start: str | None
     backfill_kind: str | None
+    backfill_window: str | None
+    backfill_start: str | None
+    backfill_end: str | None
     empty: str
     definition: str
 
@@ -92,6 +100,14 @@ class ResourceRecord(Record):
     def key(pipeline: str, resource: str) -> str:
         """``resource_id``: ``<pipeline>.<resource>``."""
         return f"{pipeline}.{resource}"
+
+    @staticmethod
+    def declared(frame: pl.DataFrame, pipeline: str) -> list[dict[str, Any]]:
+        """The pipeline's resources as its latest run declared them."""
+        own = frame.filter(pl.col("pipeline_id") == pipeline).sort("at")
+        if own.is_empty():
+            return []
+        return own.filter(pl.col("run_id") == own["run_id"][-1]).to_dicts()
 
     @staticmethod
     def describe(resource: Resource) -> dict[str, Any]:
@@ -104,6 +120,7 @@ class ResourceRecord(Record):
             "cursor_path": cursor.tracked_path if cursor else None,
             "cursor_start": cursor.format.describe(cursor.initial_value) if cursor else None,
             "backfill_kind": type(backfill).__name__ if backfill else None,
+            **_declared(backfill, cursor),
             "empty": resource.empty,
             "definition": repr(resource),
         }
@@ -326,6 +343,45 @@ RECORDS: tuple[type[Record], ...] = (
     ReconcileRecord,
 )
 """Every frame monitoring writes."""
+
+
+@dataclass(frozen=True, slots=True)
+class Frames:
+    """Every monitoring frame, read once and shared by whatever reads them: ``pipeline health``,
+    ``status``, a dashboard. A frame not given is empty, with its schema."""
+
+    pipelines: pl.DataFrame = field(default_factory=lambda: PipelineRecord.frame([]))
+    resources: pl.DataFrame = field(default_factory=lambda: ResourceRecord.frame([]))
+    runs: pl.DataFrame = field(default_factory=lambda: RunRecord.frame([]))
+    steps: pl.DataFrame = field(default_factory=lambda: StepRecord.frame([]))
+    loads: pl.DataFrame = field(default_factory=lambda: LoadRecord.frame([]))
+    tables: pl.DataFrame = field(default_factory=lambda: TableRecord.frame([]))
+    samples: pl.DataFrame = field(default_factory=lambda: SampleRecord.frame([]))
+    profiles: pl.DataFrame = field(default_factory=lambda: ProfileRecord.frame([]))
+    reconciliations: pl.DataFrame = field(default_factory=lambda: ReconcileRecord.frame([]))
+
+    @classmethod
+    def read(cls, sink: "SupportsRead", records: Iterable[type[Record]] = ()) -> "Frames":
+        """``records`` (every frame when empty) from ``sink``; the others empty."""
+        return cls(**{record.name: sink.read(record) for record in records or RECORDS})
+
+
+class SupportsRead(Protocol):
+    def read(self, record: type[Record]) -> pl.DataFrame: ...
+
+
+def _declared(backfill: Any, cursor: Any) -> dict[str, str | None]:
+    """The declared history's window kind and ``[start, end)`` edges as text (``end`` is null
+    when open-ended), so coverage needs no pipeline code."""
+    if backfill is None:
+        return dict.fromkeys(("backfill_window", "backfill_start", "backfill_end"))
+    start, end = backfill.bounds(None if cursor is None else cursor.start)
+    edge = backfill.window.format_edge
+    return {
+        "backfill_window": backfill.window.kind,
+        "backfill_start": edge(start),
+        "backfill_end": None if end is None else edge(end),
+    }
 
 
 def _polars_type(hint: Any) -> pl.DataType:

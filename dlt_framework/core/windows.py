@@ -129,3 +129,9 @@ class RowWindow(Window):
 
     def is_last(self, rows: int) -> bool:
         return rows < self.size
+
+
+WINDOWS: dict[str, type[Window]] = {
+    window.kind: window for window in (TimeWindow, ValueWindow, RowWindow)
+}
+"""Each window class by its ``kind``, as monitoring records it."""

@@ -673,3 +673,35 @@ def test_code_paths_are_anchored_on_the_package_not_a_folder_name() -> None:
     installed = "/venv/lib/python3.14/site-packages/dlt/extract/pipe.py"
     assert code_path(installed) == "dlt/extract/pipe.py"
     assert code_path("/home/me/dlt_framework/tests/test_x.py") == "test_x.py"  # a repo, not ours
+
+
+def test_frames_describe_themselves_for_readers_without_pipeline_code(
+    make_pipeline, frames, monkeypatch
+) -> None:
+    """Declared history and workers are recorded, so coverage needs no definition."""
+    monkeypatch.setenv("SOURCES__SHOP__EXTRACT__WORKERS", "2")
+    rows = Resource(
+        name="lines", write=Append(), cursor=None, empty="warn", backfill=RowBackfill(size=2)
+    )
+    upstream = Upstream([{"id": 1, "updated_at": 10}, {"id": 2, "updated_at": 60}])
+    definition = make_pipeline({ORDERS: upstream, rows: Upstream([{"id": 1, "updated_at": 1}])})
+    BackfillRun(definition)()
+
+    declared = (
+        frames("resources")
+        .sort("resource")
+        .select("resource", "backfill_window", "backfill_start", "backfill_end")
+    )
+    assert declared.rows() == [("lines", "rows", "0", None), ("orders", "value", "0", "100")]
+    pipeline = frames("pipelines").row(0, named=True)
+    workers = [pipeline[f"{step}_workers"] for step in ("extract", "normalize", "load")]
+    assert workers[0] == 2 and all(isinstance(count, int) for count in workers)
+
+    loads = frames("loads")
+    for resource in frames("resources").to_dicts():
+        recorded = Coverage.recorded(loads, resource)
+        defined = next(r for r in definition.source.resources if r.name == resource["resource"])
+        assert recorded == Coverage.of(
+            loads, resource["resource_id"], defined.backfill, defined.cursor
+        )
+    assert Coverage.recorded(loads, {"backfill_window": None}) is None

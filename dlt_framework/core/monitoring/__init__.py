@@ -3,6 +3,7 @@
 from dlt_framework.core.monitoring.coverage import Coverage
 from dlt_framework.core.monitoring.monitor import Monitor
 from dlt_framework.core.monitoring.records import (
+    Frames,
     LoadRecord,
     PipelineRecord,
     ProfileRecord,
@@ -20,6 +21,7 @@ from dlt_framework.core.monitoring.status import status
 __all__ = [
     "Coverage",
     "DatabaseSink",
+    "Frames",
     "LoadRecord",
     "Monitor",
     "ParquetSink",

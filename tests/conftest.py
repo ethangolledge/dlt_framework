@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
@@ -23,7 +24,7 @@ from dlt_framework.core import (
     ValueBackfill,
     ValueCursor,
 )
-from dlt_framework.core.monitoring import ParquetSink
+from dlt_framework.core.monitoring import ParquetSink, ResourceRecord
 from dlt_framework.core.settings import HealthSettings
 from dlt_framework.core.source import Source
 from dlt_framework.core.windows import RowWindow
@@ -117,6 +118,22 @@ def define(name: str, source: Source[Any], dataset: str = "raw_shop") -> Pipelin
         target=DuckDb(dataset=dataset),
         schema_contract=FREEZE_DATA_TYPES,
         source=source,
+    )
+
+
+def declared(definition: Pipeline, run_id: str = "r0") -> pl.DataFrame:
+    """The ``resources`` frame a run of ``definition`` writes."""
+    return ResourceRecord.frame(
+        [
+            ResourceRecord(
+                resource_id=ResourceRecord.key(definition.name, resource.name),
+                pipeline_id=definition.name,
+                run_id=run_id,
+                at=datetime(2026, 1, 1, tzinfo=UTC),
+                **ResourceRecord.describe(resource),
+            )
+            for resource in definition.source.resources
+        ]
     )
 
 

@@ -7,12 +7,12 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 import pytest
-from conftest import HEALTH, ORDERS, Upstream
+from conftest import HEALTH, ORDERS, Upstream, declared
 
 from dlt_framework.cli import main
 from dlt_framework.core.alerts import AlertSettings, attach
 from dlt_framework.core.logs import _Bound
-from dlt_framework.core.monitoring import LoadRecord, ReconcileRecord, RunRecord, StepRecord
+from dlt_framework.core.monitoring import Frames, LoadRecord, RunRecord, StepRecord
 from dlt_framework.core.monitoring.health import health
 from dlt_framework.core.run import IncrementalRun
 from dlt_framework.core.settings import HealthSettings
@@ -105,10 +105,16 @@ def shop(make_pipeline):
 
 
 def signals(definition, runs, loads=None, steps=None, reconciled=None, settings=HEALTH, now=NOW):
-    loads = LoadRecord.frame([]) if loads is None else loads
-    steps = StepRecord.frame([]) if steps is None else steps
-    reconciled = ReconcileRecord.frame([]) if reconciled is None else reconciled
-    found = health(definition, settings, runs, loads, steps, reconciled, now=now)
+    frames = Frames(runs=runs, resources=declared(definition))
+    frames = replace(
+        frames,
+        **{
+            name: frame
+            for name, frame in (("loads", loads), ("steps", steps), ("reconciliations", reconciled))
+            if frame is not None
+        },
+    )
+    found = health(definition.name, settings, frames, now=now)
     return [(signal.event, signal.level, signal.resource, signal.detail) for signal in found]
 
 

@@ -17,10 +17,12 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import count
 from types import TracebackType
-from typing import Any, Self, TypeVar
+from typing import Any, ClassVar, Self, TypeVar
 
 import dlt
 import polars as pl
+from dlt.common.configuration import configspec, resolve_configuration
+from dlt.common.configuration.specs import BaseConfiguration
 from dlt.common.pipeline import ExtractInfo, LoadInfo, NormalizeInfo
 from dlt.common.schema import Schema
 from dlt.common.schema.utils import get_root_table
@@ -320,6 +322,7 @@ class Monitor:
             source=definition.source.name,
             destination=definition.target.destination,
             dataset=definition.target.dataset,
+            **_workers(definition.source.name),
         )
 
     def _resource_record(self, resource: Resource) -> ResourceRecord:
@@ -398,6 +401,42 @@ _IDENTITY = (
     "cpu_count",
     "host_memory_mb",
 )
+
+
+@configspec
+class _ExtractWorkers(BaseConfiguration):
+    """The ``workers`` key of a dlt step's config section."""
+
+    __section__: ClassVar[str] = "extract"
+    workers: int | None = None
+
+
+@configspec
+class _NormalizeWorkers(_ExtractWorkers):
+    __section__: ClassVar[str] = "normalize"
+
+
+@configspec
+class _LoadWorkers(_ExtractWorkers):
+    __section__: ClassVar[str] = "load"
+
+
+def _workers(source: str) -> dict[str, int | None]:
+    """Workers stated for each step, from the keys dlt reads them from:
+    ``[sources.<source>.extract]`` above ``[extract]``, and ``[normalize]``, ``[load]``. Null
+    where none is stated and dlt picks at run time."""
+    specs = {
+        "extract_workers": (_ExtractWorkers(), ("sources", source)),
+        "normalize_workers": (_NormalizeWorkers(), ()),
+        "load_workers": (_LoadWorkers(), ()),
+    }
+    workers: dict[str, int | None] = {}
+    for field, (spec, sections) in specs.items():
+        try:
+            workers[field] = resolve_configuration(spec, sections=sections).workers
+        except Exception:  # never fail a run for a monitoring detail
+            workers[field] = None
+    return workers
 
 
 def _metrics(info: Any, load_id: str, key: str) -> dict[str, Any]:

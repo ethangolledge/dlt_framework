@@ -13,9 +13,9 @@ from typing import Any
 import polars as pl
 
 from dlt_framework.core.monitoring.coverage import Coverage
-from dlt_framework.core.monitoring.records import ReconcileRecord, ResourceRecord
-from dlt_framework.core.pipeline import Pipeline
+from dlt_framework.core.monitoring.records import Frames, ReconcileRecord, ResourceRecord
 from dlt_framework.core.settings import HealthSettings
+from dlt_framework.core.windows import WINDOWS
 
 COLUMNS = ("pipeline", "resource", "event", "level", "detail")
 _ENDED = ("succeeded", "failed", "lost")
@@ -42,18 +42,20 @@ class Signal:
 
 
 def health(
-    definition: Pipeline,
+    name: str,
     settings: HealthSettings,
-    runs: pl.DataFrame,
-    loads: pl.DataFrame,
-    steps: pl.DataFrame,
-    reconciliations: pl.DataFrame,
+    frames: Frames,
     now: datetime | None = None,
 ) -> list[Signal]:
-    """Signals for ``definition``'s incremental runs, its backfill coverage, and its latest
-    reconciliation."""
+    """Signals for pipeline ``name``'s incremental runs, its backfill coverage, and its latest
+    reconciliation, from the frames alone: its resources are those its latest run declared."""
     now = now or datetime.now(UTC)
-    name = definition.name
+    runs, loads, steps, reconciliations = (
+        frames.runs,
+        frames.loads,
+        frames.steps,
+        frames.reconciliations,
+    )
     own = runs.filter((pl.col("dlt_pipeline") == name) & pl.col("event").is_in(_ENDED))
     own = own.sort("at").tail(settings.history_runs)
     signals: list[Signal] = []
@@ -80,19 +82,21 @@ def health(
             signal("run_slow", "warning", f"took {latest_s:.0f}s; usually under {p95:.0f}s (p95)")
     if (retried := _retried(steps, own)) is not None:
         signal("retries_rising", "warning", retried)
-    for resource in definition.source.resources:
-        resource_id = ResourceRecord.key(name, resource.name)
-        if (unusual := _rows(loads, successes, resource_id, resource.empty, settings)) is not None:
-            signal("rows_anomaly", "warning", unusual, resource.name)
+    for resource in ResourceRecord.declared(frames.resources, name):
+        resource_id, resource_name = resource["resource_id"], resource["resource"]
+        if (
+            unusual := _rows(loads, successes, resource_id, resource["empty"], settings)
+        ) is not None:
+            signal("rows_anomaly", "warning", unusual, resource_name)
         if (mismatch := _reconciled(reconciliations, resource_id)) is not None:
-            signal("reconcile_mismatch", "warning", mismatch, resource.name)
-        if resource.backfill is not None:
-            gaps = Coverage.of(loads, resource_id, resource.backfill, resource.cursor).gaps
-            edge = resource.backfill.window.format_edge
+            signal("reconcile_mismatch", "warning", mismatch, resource_name)
+        if (coverage := Coverage.recorded(loads, resource)) is not None:
+            gaps = coverage.gaps
+            edge = WINDOWS[resource["backfill_window"]].format_edge
             if gaps and gaps[0][1] is not None:  # an open end is history not yet reached
                 first = f"[{edge(gaps[0][0])}, {edge(gaps[0][1])})"
                 signal(
-                    "coverage_gap", "warning", f"{len(gaps)} gap(s), first {first}", resource.name
+                    "coverage_gap", "warning", f"{len(gaps)} gap(s), first {first}", resource_name
                 )
     return signals
 

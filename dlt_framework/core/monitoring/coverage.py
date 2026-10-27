@@ -6,6 +6,7 @@ needs no dlt state: backfills stay stateless. A gap is a ``[start, end)`` range 
 page comes back short.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,7 @@ import polars as pl
 
 from dlt_framework.core.backfill import Backfill
 from dlt_framework.core.cursor import Cursor
+from dlt_framework.core.windows import WINDOWS, Window
 
 Range = tuple[Any, Any | None]
 
@@ -56,7 +58,30 @@ class Coverage:
     def of(
         cls, loads: pl.DataFrame, resource_id: str, backfill: Backfill, cursor: Cursor | None
     ) -> "Coverage":
-        window = backfill.window
+        """Coverage of a declared backfill."""
+        start, end = backfill.bounds(None if cursor is None else cursor.start)
+        return cls.between(loads, resource_id, backfill.window, start, end)
+
+    @classmethod
+    def recorded(cls, loads: pl.DataFrame, resource: Mapping[str, Any]) -> "Coverage | None":
+        """Coverage of the history a ``resources`` row declares, from the frames alone; ``None``
+        when it declares none."""
+        if resource.get("backfill_window") is None:
+            return None
+        window = WINDOWS[resource["backfill_window"]]
+        start = window.parse_edge(resource["backfill_start"])
+        end = (
+            None
+            if resource["backfill_end"] is None
+            else window.parse_edge(resource["backfill_end"])
+        )
+        return cls.between(loads, resource["resource_id"], window, start, end)
+
+    @classmethod
+    def between(
+        cls, loads: pl.DataFrame, resource_id: str, window: type[Window], start: Any, end: Any
+    ) -> "Coverage":
+        """Which of ``[start, end)`` (open-ended for ``None``) the loaded windows cover."""
         rows = loads.filter(
             (pl.col("resource_id") == resource_id) & (pl.col("window_kind") == window.kind)
         ).select("window_start", "window_end", "rows")
@@ -64,7 +89,6 @@ class Coverage:
             (window.parse_edge(start), window.parse_edge(end), count)
             for start, end, count in rows.iter_rows()
         ]
-        start, end = backfill.bounds(None if cursor is None else cursor.start)
         if end is None:  # open-ended: history ends at the first short window
             ends = [high for low, high, count in loaded if window.between(low, high).is_last(count)]
             end = min(ends, default=None)

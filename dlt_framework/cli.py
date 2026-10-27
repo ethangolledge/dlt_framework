@@ -39,7 +39,7 @@ from dlt_framework.core.monitoring import (
 )
 from dlt_framework.core.monitoring.health import COLUMNS as HEALTH_COLUMNS
 from dlt_framework.core.monitoring.health import health
-from dlt_framework.core.monitoring.records import RECORDS
+from dlt_framework.core.monitoring.records import RECORDS, Frames
 from dlt_framework.core.monitoring.status import COLUMNS as STATUS_COLUMNS
 from dlt_framework.core.pipeline import Pipeline, install_for
 from dlt_framework.core.reconcile import reconcile
@@ -198,18 +198,17 @@ def _ranges(
 
 def _status(args: argparse.Namespace) -> None:
     rows = []
-    for definition, _, (runs, loads) in _monitored(args.pipeline, RunRecord, LoadRecord):
-        rows.extend(status(definition, runs, loads))
+    for definition, _, frames in _monitored(args.pipeline, RunRecord, LoadRecord):
+        rows.extend(status(definition, frames.runs, frames.loads))
     _print(rows, STATUS_COLUMNS)
 
 
 def _health(args: argparse.Namespace) -> int:
     """Each signal as a log line (an alert event) and a table row; exit 6 when any."""
     signals = []
-    records = (RunRecord, LoadRecord, StepRecord, ReconcileRecord)
+    records = (RunRecord, ResourceRecord, LoadRecord, StepRecord, ReconcileRecord)
     for definition, settings, frames in _monitored(args.pipeline, *records):
-        runs, loads, steps, reconciliations = frames
-        signals.extend(health(definition, settings.health, runs, loads, steps, reconciliations))
+        signals.extend(health(definition.name, settings.health, frames))
     for signal in signals:
         LOGGER.log(
             logging.ERROR if signal.level == "error" else logging.WARNING,
@@ -260,16 +259,15 @@ def _compact(args: argparse.Namespace) -> None:
 
 def _monitored(
     pipeline: str | None, *records: type[Record]
-) -> Iterator[tuple[Pipeline, RunSettings, list[pl.DataFrame]]]:
+) -> Iterator[tuple[Pipeline, RunSettings, Frames]]:
     """Each named pipeline (all when ``None``) with its settings and ``records`` frames, read
     once per monitoring sink however many pipelines share it."""
-    read: dict[str, list[pl.DataFrame]] = {}
+    read: dict[str, Frames] = {}
     for name in [pipeline] if pipeline else sorted(Pipeline.registry):
         settings = RunSettings.of(name)
         uri = settings.monitoring.uri
         if uri not in read:
-            sink = Sink.resolve(uri)
-            read[uri] = [sink.read(record) for record in records]
+            read[uri] = Frames.read(Sink.resolve(uri), records)
         yield Pipeline.get(name), settings, read[uri]
 
 

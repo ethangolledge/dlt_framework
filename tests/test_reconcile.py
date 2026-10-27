@@ -5,16 +5,15 @@ from datetime import UTC, datetime
 
 import polars as pl
 import pytest
-from conftest import HEALTH, define
+from conftest import HEALTH, declared, define
 
 from dlt_framework.cli import main
 from dlt_framework.core import Integer, Merge, Resource, ValueBackfill, ValueCursor
 from dlt_framework.core.monitoring import (
-    LoadRecord,
+    Frames,
     ParquetSink,
     ReconcileRecord,
     RunRecord,
-    StepRecord,
 )
 from dlt_framework.core.monitoring.health import health
 from dlt_framework.core.reconcile import reconcile
@@ -82,10 +81,10 @@ def test_health_reports_the_latest_reconciliation(erp, query, sink) -> None:
     query("DELETE FROM raw_shop.orders WHERE id = 2")
     query("INSERT INTO raw_shop.orders SELECT * FROM raw_shop.orders WHERE id = 4")
     reconciled = ReconcileRecord.frame(reconcile(IncrementalRun(erp), True))
-    frames = (sink.read(RunRecord), LoadRecord.frame([]), StepRecord.frame([]), reconciled)
+    frames = Frames(runs=sink.read(RunRecord), resources=declared(erp), reconciliations=reconciled)
     found = [
         (signal.resource, signal.detail)
-        for signal in health(erp, HEALTH, *frames)
+        for signal in health(erp.name, HEALTH, frames)
         if signal.event == "reconcile_mismatch"
     ]
     assert found == [
