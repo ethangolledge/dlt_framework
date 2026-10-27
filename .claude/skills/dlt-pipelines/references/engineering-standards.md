@@ -24,11 +24,13 @@ Before adding any function, class, module, flag, or dependency:
    | Source contract: `resource`, `validate`, `state_key`, `windows`, shared preparation; `Extraction` (one build's window and its after-commit work) | `core/source.py` |
    | Pipeline identity, registry, discovery | `core/pipeline.py` |
    | Retry policy (a configspec) and classification; `MemoryError`, permission and terminal errors never retried | `core/retry.py` |
-   | Settings every environment states (retry, monitoring, guards, logging) | `core/settings.py` |
+   | Settings every environment states (retry, monitoring, health, guards, logging) | `core/settings.py` |
    | Resolving settings (`resolve`, `REQUIRED`) and registries chosen by config | `core/config.py` |
    | Decoded cursor state (one place for the state path) | `core/state.py` (`stored_cursor`) |
-   | Monitoring records → Polars frames, sinks (write and read), sampler, monitor, backfill coverage, status | `core/monitoring/` |
-   | One log format for framework and dlt lines | `core/logs.py` |
+   | Monitoring records → Polars frames, sinks (write, read, compact), sampler, profiler, monitor, backfill coverage, status, health | `core/monitoring/` |
+   | Counting what the destination (and source) holds | `core/reconcile.py`; a source's own count is `Source.count` |
+   | One log format for framework and dlt lines; fields bound to every line of a run (`logs.bound`) | `core/logs.py` |
+   | The webhook fallback for alert events | `core/alerts.py` |
    | Run spine, incremental vs backfill, guards, rollback after extract, staging layout, lock | `core/run.py` |
    | PDFs to rows: templates and locators, model fallback, OCR, disposal after load | `sources/filesystem/documents/` |
    | Opening folders and buckets with one credentials setting | `core/buckets.py` |
@@ -58,12 +60,14 @@ Dependency direction is `cli` → `sources` → `core`. Source types never impor
 | A new cursor format | A `TimeFormat` / `ValueFormat` subclass with `render` and `parse`: in `core/formats.py` if generic, else in the source package | Branching on formats in adapters |
 | A new cursor or window kind | A `Cursor` / `Window` / `Backfill` subclass in `core/` | `if kind == ...` chains |
 | A new write behaviour (hard deletes, scd2 options) | A field on, or class beside, `Merge`/`Append`/`Replace` in `core/write.py` | Hints applied in adapters |
-| Alerting on a run's outcome | The orchestrator, per task, from the exit code and the failure log line | Alert channels in the framework |
+| Alerting on a run's outcome | The orchestrator, per task, from the exit code and the `event` field of log lines; where there is none, the one generic webhook in `core/alerts.py`, configured by URL and body template | A channel for a named service (Telegram, Slack) in code |
+| A new health signal | A rule in `core/monitoring/health.py` reading the frames, its threshold a `HealthSettings` field | A threshold checked inside a run |
+| A source that can count its rows | `Source.count(resource, window)` on its `Source` subclass | Counting in `core/reconcile.py` by source type |
 | A new document layout | A `Template` (with `Text`/`Table` locators) in the pipeline that reads it | A new extractor class per layout |
 | A new way to find a field, extract a document, or dispose of a file | A `Locator`, `Extractor`, or `Disposal` subclass in `sources/filesystem/documents/` | Branching in `Documents` |
 | A new monitoring destination (HTTP collector, queue, warehouse) | `@sinks.register("scheme")` on a `Sink` implementing `from_uri`/`write`/`read` | Branching on destinations in `Monitor` |
-| A new operational setting | A field on the relevant spec in `core/settings.py` (`= REQUIRED`), stated in `.dlt/config.toml` | A default in code, or `os.environ` reads |
-| A new monitored metric | A field on the relevant record in `core/monitoring/records.py` (schema derives from it), filled by `Monitor` | A second schema definition, or log lines parsed later |
+| A new operational setting | A field on the relevant spec in `core/settings.py` (`= REQUIRED`), stated in `.dlt/config.toml` (the one exception: `alerts.webhook_url`, a secret that is off unless set) | A default in code, or `os.environ` reads |
+| A new monitored metric | A field on the relevant record in `core/monitoring/records.py` (schema derives from it), filled by `Monitor` from what the run hands it or dlt's step results; a new frame also goes in `RECORDS` | A second schema definition, log lines parsed later, or measuring inside a loader |
 | A new run type | Subclass `Run`; set class attributes, implement `units` (and `check`) | Copy `__call__` |
 | Code two source types both need | `core/`, deliberately, with a test, once a second consumer exists | Copy it into both packages |
 

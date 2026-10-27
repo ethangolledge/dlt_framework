@@ -32,7 +32,33 @@ give_up_after_s = 120
 # Memory and CPU are sampled every sample_every_s and written every flush_every_s, so a run
 # killed for OOM still leaves its memory trend. uri is a secret.
 sample_every_s = 15
-flush_every_s = 60
+flush_every_s = 60   # written at once instead while memory is above 70% of the limit
+code_version = "dev"   # set per build: MONITORING__CODE_VERSION=<image tag or git sha>
+profile_every_ms = 0   # 0 is off; `pipeline run --profile` samples stacks every 10 ms
+
+[alerts]
+# A fallback for where no orchestrator alerts on exit codes and log events: those events are
+# posted to one webhook. Off until ALERTS__WEBHOOK_URL (a secret) is set. body is a template of
+# log fields ($level $pipeline $event $message $run_id $error_where ...), so any service works,
+# e.g. Telegram: url https://api.telegram.org/bot<token>/sendMessage and
+# body '{"chat_id": "<chat>", "text": "$level $pipeline $event: $message"}'.
+body = '{"text": "$level $pipeline $event: $message (run $run_id)"}'
+events = ["run_failed", "run_lost", "run_stale", "run_slow", "rows_anomaly", "memory_high", "retries_rising", "coverage_gap"]
+level = "WARNING"
+cooldown_s = 3600   # one alert per pipeline and event an hour
+timeout_s = 10
+
+[health]
+# `pipeline health` judges each pipeline against its own recent history (history_runs runs).
+# expect_every_s = 0 derives the schedule from the median gap between successes, once there
+# are five; state it (e.g. [pipelines.sec_form4.health] expect_every_s = 86400) once a schedule
+# is fixed, as runs started by hand make the derived one meaningless.
+history_runs = 20
+expect_every_s = 0
+stale_after_intervals = 2.0   # late after twice the expected gap
+slow_after = 1.5              # slow above 1.5 x the p95 duration
+rows_spike = 10.0             # unusual above 10 x the median rows, or 0 where usually more
+memory_headroom = 0.2         # warn when a run left under 20% of its memory free
 
 [guards]
 # A time cursor further than this ahead of now is refused before it is committed: one row dated

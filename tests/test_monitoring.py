@@ -1,25 +1,41 @@
+import io
+import json
 import logging
 import os
+import re
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import ClassVar
 
 import polars as pl
 import pytest
 import sqlalchemy as sa
-from conftest import ORDERS, Upstream
+from conftest import ORDERS, Upstream, define
 
+import dlt_framework
 from dlt_framework.cli import main
-from dlt_framework.core import Duration, RowBackfill, TimeBackfill, TimeCursor, UnixSeconds
+from dlt_framework.core import (
+    Append,
+    Duration,
+    Replace,
+    Resource,
+    RowBackfill,
+    TimeBackfill,
+    TimeCursor,
+    UnixSeconds,
+)
 from dlt_framework.core.errors import (
     ConfigurationError,
     ResourceExhaustedError,
     TerminalRunError,
+    code_path,
     redact,
 )
-from dlt_framework.core.logs import _Handler
+from dlt_framework.core.logs import JsonFormatter, TextFormatter, _Handler
 from dlt_framework.core.monitoring import (
     Coverage,
     DatabaseSink,
@@ -39,6 +55,7 @@ from dlt_framework.core.monitoring.sampler import ResourceSampler
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.core.settings import MonitoringSettings
 from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow, Window
+from dlt_framework.sources.filesystem import Csv, Files, FilesystemSource
 
 
 def lost_runs(runs: pl.DataFrame) -> pl.DataFrame:
@@ -243,7 +260,9 @@ def test_memory_error_is_not_retried_and_exits_5(make_pipeline, frames, monkeypa
 
 def test_a_killed_run_leaves_its_start_and_memory_trend(make_pipeline, sink, frames) -> None:
     definition = make_pipeline({ORDERS: Upstream([])})
-    every = MonitoringSettings(uri="unused", sample_every_s=0.01, flush_every_s=0)
+    every = MonitoringSettings(
+        uri="unused", sample_every_s=0.01, flush_every_s=0, code_version="test", profile_every_ms=0
+    )
     monitor = Monitor(sink, definition, every, dlt_pipeline="shop", mode="run")
     monitor.__enter__()
     monitor._sampler.stop()  # the process dies: no finished(), no __exit__
@@ -361,10 +380,13 @@ def loads(*windows: tuple[Window, int]) -> pl.DataFrame:
             window_kind=window.kind,
             window_start=window.span()[0],
             window_end=window.span()[1],
+            part=index,
             rows=rows,
-            extract_s=0.0,
-            normalize_s=0.0,
-            load_s=0.0,
+            child_rows=0,
+            bytes=0,
+            extract_first_at=None,
+            extract_last_at=None,
+            cursor_start_value=None,
             cursor_last_value=None,
         )
         for index, (window, rows) in enumerate(windows)
@@ -417,3 +439,237 @@ def test_sinks_read_back_what_they_wrote(tmp_path) -> None:
         back = sink.read(LoadRecord)
         assert back.schema == pl.Schema(LoadRecord.schema())
         assert back.drop("at").equals(frame.drop("at"))
+
+
+# ---- what each frame says about a run: every column against a run whose answers are known --
+
+
+CUSTOMERS = Resource(name="customers", write=Replace(), cursor=None, empty="fail")
+
+
+def test_loads_and_tables_say_what_each_resource_and_table_received(make_pipeline, frames) -> None:
+    orders = Upstream(
+        [
+            {"id": 1, "updated_at": 100, "lines": [{"sku": "a"}, {"sku": "b"}]},
+            {"id": 2, "updated_at": 110, "lines": [{"sku": "c"}]},
+        ]
+    )
+    customers = Upstream([{"id": 7, "updated_at": None}])
+    definition = make_pipeline({ORDERS: orders, CUSTOMERS: customers})
+    IncrementalRun(definition)()
+
+    loads = frames("loads").sort("resource_id")
+    assert loads.select(
+        "resource_id", "part", "rows", "child_rows", "cursor_start_value", "cursor_last_value"
+    ).rows() == [
+        ("shop.customers", 0, 1, 0, None, None),
+        ("shop.orders", 0, 2, 3, "100", "110"),  # from the cursor's start; three nested lines
+    ]
+    assert (loads["bytes"] > 0).all()
+    assert (loads["extract_first_at"] <= loads["extract_last_at"]).all()
+    assert loads["load_id"].n_unique() == 1  # extracted together, one package
+
+    tables = frames("tables").sort("table")
+    assert tables.select("resource_id", "table", "rows").rows() == [
+        ("shop.customers", "customers", 1),
+        ("shop.orders", "orders", 2),
+        ("shop.orders", "orders__lines", 3),
+    ]
+    assert (tables["jobs"] >= 1).all() and (tables["load_s"] >= 0).all()
+    assert (tables["retries"] == 0).all()
+
+    orders.rows.append({"id": 3, "updated_at": 120, "lines": []})
+    IncrementalRun(definition)()
+    second = (
+        frames("loads")
+        .filter(pl.col("resource_id") == "shop.orders")
+        .sort("at")
+        .row(-1, named=True)
+    )
+    assert (second["cursor_start_value"], second["cursor_last_value"]) == ("110", "120")
+
+
+def test_steps_record_each_attempt_with_its_load(make_pipeline, frames, monkeypatch) -> None:
+    """A step that heals on its second attempt shows both; steps of a load carry its id."""
+    calls = []
+
+    def flaky(incremental, window):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("upstream reset the connection")
+        yield [{"id": 1, "updated_at": 100}]
+
+    monkeypatch.setenv("RETRY__ATTEMPTS", "2")
+    IncrementalRun(make_pipeline({ORDERS: flaky}))()
+
+    steps = frames("steps").sort("started_at")
+    assert steps.select("step", "attempt", "outcome", "error_cause_type").rows() == [
+        ("sync", 1, "ok", None),
+        ("extract", 1, "failed", "ConnectionError"),
+        ("extract", 2, "ok", None),
+        ("normalize", 1, "ok", None),
+        ("load", 1, "ok", None),
+    ]
+    (load_id,) = frames("loads")["load_id"]
+    assert steps.filter(pl.col("step") != "sync")["load_id"].to_list() == [load_id] * 4
+    assert steps.filter(pl.col("step") == "extract")["resources"].to_list() == ["orders"] * 2
+    assert (steps["duration_s"] >= 0).all() and (steps["cpu_s"] >= 0).all()
+    run = frames("runs").filter(pl.col("event") == "succeeded").row(0, named=True)
+    assert run["duration_s"] >= steps["duration_s"].sum()
+
+
+def test_samples_say_what_was_running(make_pipeline, frames, monkeypatch) -> None:
+    def slow(incremental, window):
+        time.sleep(0.3)
+        yield [{"id": 1, "updated_at": 100}]
+
+    monkeypatch.setenv("MONITORING__SAMPLE_EVERY_S", "0.02")
+    IncrementalRun(make_pipeline({ORDERS: slow}))()
+
+    samples = frames("samples")
+    extracting = samples.filter(pl.col("step") == "extract")
+    assert extracting.height >= 3 and set(extracting["resources"]) == {"orders"}
+    assert (samples["system_total_mb"] >= samples["system_available_mb"]).all()
+    assert (samples["threads"] >= 1).all() and (samples["rss_mb"] > 0).all()
+
+
+def test_samples_are_written_at_once_under_memory_pressure(make_pipeline, sink, frames) -> None:
+    settings = MonitoringSettings(
+        uri="unused", sample_every_s=3600, flush_every_s=3600, code_version="t", profile_every_ms=0
+    )
+    monitor = Monitor(sink, make_pipeline({}), settings, dlt_pipeline="shop", mode="run")
+    monitor.memory_limit_mb = 1000.0
+    calm = {"rss_mb": 100.0, "cpu_percent": 1.0, "threads": 1, "read_mb_s": None}
+    calm |= {"write_mb_s": None, "system_available_mb": 1.0, "system_total_mb": 2.0}
+    monitor._sampled(calm)
+    assert sink.read(SampleRecord).is_empty()  # held until the next flush
+    monitor._sampled(calm | {"rss_mb": 800.0})  # 80% of the limit
+    assert sink.read(SampleRecord)["rss_mb"].to_list() == [100.0, 800.0]
+
+
+def test_the_next_run_records_a_killed_run_as_lost(make_pipeline, sink, frames, caplog) -> None:
+    definition = make_pipeline({ORDERS: Upstream([{"id": 1, "updated_at": 100}])})
+    every = MonitoringSettings(
+        uri="unused", sample_every_s=0.01, flush_every_s=0, code_version="t", profile_every_ms=0
+    )
+    killed = Monitor(sink, definition, every, dlt_pipeline="shop", mode="run")
+    killed.__enter__()
+    killed._phase = ("load", "orders")
+    time.sleep(0.05)
+    killed._sampler.stop()  # the process dies: no finished(), no __exit__
+
+    IncrementalRun(definition)()
+    IncrementalRun(definition)()  # reported once, not again
+
+    lost = frames("runs").filter(pl.col("event") == "lost")
+    assert lost["run_id"].to_list() == [killed.run_id]
+    row = lost.row(0, named=True)
+    assert (row["error_step"], row["error_resource"], row["code_version"]) == (
+        "load",
+        "orders",
+        "t",
+    )
+    assert row["duration_s"] > 0 and row["peak_rss_mb"] > 0
+    (logged,) = [r for r in caplog.records if getattr(r, "event", None) == "run_lost"]
+    assert killed.run_id in logged.getMessage() and "in load of orders" in logged.getMessage()
+
+
+def test_a_failure_names_the_resource_that_broke_not_all_extracted_with_it(
+    make_pipeline, frames
+) -> None:
+    def broken(incremental, window):
+        raise ValueError("upstream returned garbage")
+        yield
+
+    definition = make_pipeline(
+        {CUSTOMERS: Upstream([{"id": 1, "updated_at": None}]), ORDERS: broken}
+    )
+    with pytest.raises(TerminalRunError) as raised:
+        IncrementalRun(definition)()
+    assert raised.value.resource == "orders"
+    failed = frames("runs").filter(pl.col("event") == "failed").row(0, named=True)
+    assert failed["error_resource"] == "orders"
+    # Innermost in this package: the wrapper around a custom extract; a project's own extract
+    # code lives in the package too, so there it is named itself.
+    assert re.fullmatch(r"dlt_framework/core/source\.py:\d+ in run", failed["error_where"])
+    assert failed["error_origin"].endswith("in broken")
+    assert failed["error_chain"].splitlines()[-1] == "ValueError: upstream returned garbage"
+    assert "Traceback" in failed["error_traceback"]
+
+
+def test_a_bad_file_is_named_in_the_failure(tmp_path, frames) -> None:
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "good.csv").write_text("id\n1\n")
+    (folder / "bad.csv").write_bytes(b"id\n1\n2\xff\xfe\n")  # not UTF-8: DuckDB refuses it
+    resource = Resource(name="orders", write=Append(), cursor=None, empty="fail")
+    files = Files(bucket_url=folder.as_uri(), file_glob="*.csv", reader=Csv())
+    with pytest.raises(TerminalRunError):
+        IncrementalRun(
+            define("files", FilesystemSource(name="files", resources={resource: files}))
+        )()
+    failed = frames("runs").filter(pl.col("event") == "failed").row(0, named=True)
+    assert failed["error_notes"] == f"while reading {(folder / 'bad.csv').as_uri()}"
+    assert failed["error_where"].startswith("dlt_framework/sources/filesystem/source.py:")
+
+
+@pytest.mark.parametrize("formatter", [JsonFormatter, TextFormatter])
+def test_every_log_line_of_a_run_carries_its_run_id(
+    make_pipeline, frames, caplog, formatter
+) -> None:
+    """Through the handler the CLI installs, framework and dlt lines alike."""
+    caplog.set_level(logging.INFO)
+    stream = io.StringIO()
+    handler = _Handler()
+    handler.setStream(stream)
+    handler.setFormatter(formatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        IncrementalRun(make_pipeline({ORDERS: Upstream([])}))()  # warns "extracted no rows"
+    finally:
+        root.removeHandler(handler)
+    (run_id,) = frames("runs")["run_id"].unique()
+    (load_id,) = frames("loads")["load_id"]
+    lines = [line for line in stream.getvalue().splitlines() if "dlt_framework" in line]
+    assert any("extracted no rows" in line for line in lines)
+    if formatter is TextFormatter:
+        assert all(f"[{run_id}]: " in line for line in lines)
+        return
+    logged = [json.loads(line) for line in lines]
+    assert all(line["run_id"] == run_id and line["pipeline"] == "shop" for line in logged)
+    (loaded,) = [line for line in logged if line["message"].startswith("Loaded")]
+    assert loaded["load_id"] == load_id
+
+
+def crunch(seconds: float) -> int:
+    """Busy work a profile should find."""
+    end, total = time.monotonic() + seconds, 0
+    while time.monotonic() < end:
+        total += sum(range(200))
+    return total
+
+
+def test_a_profiled_run_finds_where_extract_spends_its_time(
+    make_pipeline, frames, monkeypatch
+) -> None:
+    def busy(incremental, window):
+        crunch(0.5)
+        yield [{"id": 1, "updated_at": 100}]
+
+    monkeypatch.setenv("MONITORING__PROFILE_EVERY_MS", "5")
+    IncrementalRun(make_pipeline({ORDERS: busy}))()
+
+    profile = frames("profiles").filter(pl.col("step") == "extract")
+    top = profile.sort("own_samples", descending=True).row(0, named=True)
+    assert (top["function"], top["file"]) == ("test_monitoring:crunch", "test_monitoring.py")
+    assert top["own_samples"] == top["total_samples"] > 0  # it calls no Python of its own
+    assert 0 < top["own_share"] <= 1
+
+
+def test_code_paths_are_anchored_on_the_package_not_a_folder_name() -> None:
+    package = Path(dlt_framework.__file__).parent
+    assert code_path(str(package / "core" / "run.py")) == "dlt_framework/core/run.py"
+    installed = "/venv/lib/python3.14/site-packages/dlt/extract/pipe.py"
+    assert code_path(installed) == "dlt/extract/pipe.py"
+    assert code_path("/home/me/dlt_framework/tests/test_x.py") == "test_x.py"  # a repo, not ours

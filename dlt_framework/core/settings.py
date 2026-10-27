@@ -1,7 +1,7 @@
 """Runtime settings: how runs behave in an environment, stated in ``.dlt/config.toml``.
 
 Pipeline definitions state what lands; these state how runs behave: retries, monitoring,
-guards, and logging. They resolve through dlt's configuration system, so each key
+guards, health thresholds, and logging. They resolve through dlt's configuration system, so each key
 can also come from an environment variable (``RETRY__ATTEMPTS``) or a vault, and any section can
 be overridden for one pipeline, field by field:
 
@@ -22,11 +22,19 @@ from dlt_framework.core.retry import Retry
 
 @configspec
 class MonitoringSettings(BaseConfiguration):
-    """``uri`` picks the sink by scheme and is a secret: it can hold a database password."""
+    """``uri`` picks the sink by scheme and is a secret: it can hold a database password.
+
+    ``code_version`` is written on every run, so a change in behaviour can be traced to a
+    release: set it per build (``MONITORING__CODE_VERSION`` = the image tag or git SHA).
+    ``profile_every_ms`` samples every thread's stack at that interval into ``profiles``; 0 is
+    off (``pipeline run --profile`` turns it on for one run).
+    """
 
     uri: TSecretStrValue = REQUIRED
     sample_every_s: float = REQUIRED
     flush_every_s: float = REQUIRED
+    code_version: str = REQUIRED
+    profile_every_ms: float = REQUIRED
 
     def on_resolved(self) -> None:
         if not self.uri:
@@ -42,10 +50,31 @@ class GuardSettings(BaseConfiguration):
 
 
 @configspec
+class HealthSettings(BaseConfiguration):
+    """What ``pipeline health`` calls wrong, against each pipeline's own history.
+
+    ``expect_every_s`` is how often the pipeline should succeed; 0 derives it from the median
+    gap between recent successes. It is late (``run_stale``) after ``stale_after_intervals`` of
+    those, slow after ``slow_after`` times the p95 of recent durations, and its rows unusual at
+    ``rows_spike`` times their median, or none where there usually are some. ``history_runs``
+    is how many recent runs are compared; ``memory_headroom`` the share of memory a run should
+    leave free.
+    """
+
+    history_runs: int = REQUIRED
+    expect_every_s: float = REQUIRED
+    stale_after_intervals: float = REQUIRED
+    slow_after: float = REQUIRED
+    rows_spike: float = REQUIRED
+    memory_headroom: float = REQUIRED
+
+
+@configspec
 class RunSettings(BaseConfiguration):
     retry: Retry = REQUIRED
     monitoring: MonitoringSettings = REQUIRED
     guards: GuardSettings = REQUIRED
+    health: HealthSettings = REQUIRED
 
     @classmethod
     def of(cls, pipeline: str) -> "RunSettings":

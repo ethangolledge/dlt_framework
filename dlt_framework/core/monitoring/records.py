@@ -5,7 +5,9 @@ that is killed still leaves the rows it already wrote. A record's Polars schema 
 its own type hints: the columns are declared once, on the dataclass.
 
 The frames form a star schema. ``pipelines`` and ``resources`` describe definitions; ``runs``,
-``loads``, and ``samples`` are facts about them. Keys are deterministic and readable:
+``steps``, ``loads``, ``tables``, ``samples``, ``profiles``, and ``reconciliations`` are facts
+about them. Keys are
+deterministic and readable:
 
 - ``pipeline_id`` is the pipeline name, which is permanent because it keys dlt state;
 - ``resource_id`` is ``<pipeline_id>.<resource name>``;
@@ -109,9 +111,16 @@ class ResourceRecord(Record):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RunRecord(Record):
-    """A lifecycle event: ``started``, then ``succeeded`` or ``failed``.
+    """A lifecycle event: ``started``, then ``succeeded`` or ``failed``; or ``lost``.
 
-    A ``started`` with no matching end event is a lost run, e.g. a container killed for OOM.
+    A run killed from outside (an OOM kill, a stopped container) cannot write its end. The next
+    run of the same pipeline writes ``lost`` for it, with what its last samples showed:
+    ``duration_s`` up to the last sample, ``peak_rss_mb``, and the step running then.
+
+    ``duration_s`` is wall time from start to the end event. The ``error_*`` columns say what
+    failed (type, root cause type, message), where (the step, the resource, the window; the
+    innermost frame in this package and the innermost overall), on what input (exception
+    notes), and how it was raised (one line per cause, and the redacted traceback).
     """
 
     name: ClassVar[str] = "runs"
@@ -124,7 +133,12 @@ class RunRecord(Record):
     at: datetime
     host: str
     dlt_version: str
+    code_version: str
+    python: str
+    cpu_count: int
+    host_memory_mb: float
     rows: int | None = None
+    duration_s: float | None = None
     exit_code: int | None = None
     error_type: str | None = None
     error_step: str | None = None
@@ -132,17 +146,52 @@ class RunRecord(Record):
     error_window: str | None = None
     error_cause_type: str | None = None
     error_message: str | None = None
+    error_where: str | None = None
+    error_origin: str | None = None
+    error_chain: str | None = None
+    error_notes: str | None = None
+    error_traceback: str | None = None
     peak_rss_mb: float | None = None
     memory_limit_mb: float | None = None
     cpu_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class StepRecord(Record):
+    """One attempt at one step: ``sync``, ``pending``, ``extract``, ``normalize``, or ``load``.
+
+    A retried step has a row per attempt, the failed ones with ``outcome="failed"``. ``load_id``
+    is set on the steps of a load once it commits, and is null for ``sync``, ``pending``, and
+    a load that failed. ``cpu_s`` is this process's CPU time over the attempt: near
+    ``duration_s`` or above it the step was busy computing, near 0 it was waiting on upstream or
+    the destination. Pipelines run in one process share it.
+    """
+
+    name: ClassVar[str] = "steps"
+
+    run_id: str
+    load_id: str | None
+    step: str
+    attempt: int
+    resources: str | None
+    at: datetime
+    started_at: datetime
+    duration_s: float
+    cpu_s: float
+    outcome: str
+    error_cause_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LoadRecord(Record):
     """One resource loaded over one window (``window_kind`` is ``increment`` on runs).
 
-    ``(load_id, resource_id)`` is unique. Step timings cover the whole window, shared by the
-    resources loaded in it.
+    ``(load_id, resource_id)`` is unique. ``part`` numbers the loads of one unit: the chunks of
+    an increment, or the windows of a backfill. ``rows`` are the resource's own rows;
+    ``child_rows`` those of its nested tables. ``bytes`` is what extract wrote, and
+    ``extract_first_at``/``extract_last_at`` when this resource wrote its first and last item,
+    so its own extract time shows even when resources extract together. The cursor moved from
+    ``cursor_start_value`` to ``cursor_last_value``; both are null without a cursor.
     """
 
     name: ClassVar[str] = "loads"
@@ -154,24 +203,129 @@ class LoadRecord(Record):
     window_kind: str
     window_start: str | None
     window_end: str | None
+    part: int
     rows: int
-    extract_s: float
-    normalize_s: float
-    load_s: float
+    child_rows: int
+    bytes: int
+    extract_first_at: datetime | None
+    extract_last_at: datetime | None
+    cursor_start_value: str | None
     cursor_last_value: str | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TableRecord(Record):
+    """One destination table written by one load: a resource's own table or a nested one.
+
+    ``load_s`` spans its load jobs (for a merge, the merge itself), so a slow table, such as a
+    merge without an index, stands out from the rest of its load.
+    """
+
+    name: ClassVar[str] = "tables"
+
+    load_id: str
+    resource_id: str
+    run_id: str
+    at: datetime
+    table: str
+    rows: int
+    bytes: int
+    jobs: int
+    retries: int
+    load_started_at: datetime | None
+    load_finished_at: datetime | None
+    load_s: float | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SampleRecord(Record):
-    """This process's memory and CPU at one moment of a run."""
+    """This process's memory, CPU, and IO at one moment of a run, and what it was doing.
+
+    ``memory_limit_mb`` is the container's limit, null outside one; ``system_available_mb`` is
+    what the host could still give, so headroom is known either way. ``step`` and
+    ``resources`` are what the run was doing when sampled.
+    """
 
     name: ClassVar[str] = "samples"
 
     run_id: str
     at: datetime
+    step: str | None
+    resources: str | None
     rss_mb: float
     cpu_percent: float
+    threads: int
+    read_mb_s: float | None
+    write_mb_s: float | None
     memory_limit_mb: float | None
+    system_available_mb: float
+    system_total_mb: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfileRecord(Record):
+    """Where a profiled run spent its time: one row per step and function.
+
+    Stacks of every thread are sampled at a fixed interval. ``own_samples`` counts samples whose
+    innermost frame was this function (time in its own code), ``total_samples`` those with it
+    anywhere on the stack (time in it and what it called); the shares divide by the step's
+    samples. A thread blocked on a socket counts: waiting on upstream is time spent.
+    """
+
+    name: ClassVar[str] = "profiles"
+
+    run_id: str
+    at: datetime
+    step: str | None
+    function: str
+    file: str
+    line: int
+    own_samples: int
+    total_samples: int
+    own_share: float
+    total_share: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReconcileRecord(Record):
+    """What a destination table holds, from ``pipeline reconcile``: one ``all`` row per
+    resource, and one per backfill window where the cursor column is in the table.
+
+    ``distinct_keys`` (on ``all`` rows of resources with a primary key) below
+    ``destination_rows`` means duplicate keys. ``source_rows`` is upstream's count where the
+    source can give one (``--source``): a window where they differ is missing or extra rows.
+    """
+
+    name: ClassVar[str] = "reconciliations"
+
+    reconcile_id: str
+    resource_id: str
+    at: datetime
+    window_kind: str
+    window_start: str | None
+    window_end: str | None
+    destination_rows: int
+    distinct_keys: int | None
+    source_rows: int | None
+
+    @staticmethod
+    def window(kind: str, start: str | None, end: str | None) -> str:
+        """``all``, or the window as ``[start, end)``."""
+        return "all" if kind == "all" else f"[{start}, {end})"
+
+
+RECORDS: tuple[type[Record], ...] = (
+    PipelineRecord,
+    ResourceRecord,
+    RunRecord,
+    StepRecord,
+    LoadRecord,
+    TableRecord,
+    SampleRecord,
+    ProfileRecord,
+    ReconcileRecord,
+)
+"""Every frame monitoring writes."""
 
 
 def _polars_type(hint: Any) -> pl.DataType:

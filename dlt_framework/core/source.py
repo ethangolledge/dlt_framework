@@ -112,6 +112,11 @@ class Source(ABC, Generic[ConfigT]):
         """The dlt resource whose state holds this resource's cursor."""
         return resource.name
 
+    def count(self, resource: Resource, window: Window | None) -> int | None:
+        """How many rows upstream holds for ``resource`` in ``window`` (all of them for
+        ``None``), for ``pipeline reconcile --source``; ``None`` where upstream cannot say."""
+        return None
+
     def validate(self, resource: Resource, config: ConfigT) -> None:
         if resource.backfill is not None and resource.backfill.window not in self.windows:
             raise DefinitionError(

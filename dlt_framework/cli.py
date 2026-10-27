@@ -9,7 +9,7 @@ import argparse
 import logging
 import sys
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -17,6 +17,7 @@ import polars as pl
 from dlt.common.runtime import signals
 
 from dlt_framework.core import logs
+from dlt_framework.core.alerts import AlertSettings
 from dlt_framework.core.config import resolve
 from dlt_framework.core.errors import (
     ConfigurationError,
@@ -28,13 +29,20 @@ from dlt_framework.core.errors import (
 from dlt_framework.core.monitoring import (
     Coverage,
     LoadRecord,
+    ReconcileRecord,
+    Record,
     ResourceRecord,
     RunRecord,
     Sink,
+    StepRecord,
     status,
 )
+from dlt_framework.core.monitoring.health import COLUMNS as HEALTH_COLUMNS
+from dlt_framework.core.monitoring.health import health
+from dlt_framework.core.monitoring.records import RECORDS
 from dlt_framework.core.monitoring.status import COLUMNS as STATUS_COLUMNS
 from dlt_framework.core.pipeline import Pipeline, install_for
+from dlt_framework.core.reconcile import reconcile
 from dlt_framework.core.run import BackfillRun, IncrementalRun, Run
 from dlt_framework.core.settings import LoggingSettings, RunSettings
 
@@ -100,12 +108,23 @@ def _readiness() -> None:
     _print(rows, ("pipeline", "ready", "install"))
 
 
+PROFILE_EVERY_MS = 10  # what --profile samples at
+UNHEALTHY = 6  # pipeline health's exit code when it found something wrong
+RECONCILE_COLUMNS = ("resource", "window", "rows", "distinct_keys", "source_rows")
+
+
 def _run(args: argparse.Namespace) -> int:
     return _each(args, lambda d: IncrementalRun(d, args.resource, args.allow_initial_load))
 
 
 def _backfill(args: argparse.Namespace) -> int:
     return _each(args, lambda d: BackfillRun(d, args.resource, _ranges(d, args)))
+
+
+def _profiled(run: Run, args: argparse.Namespace) -> Run:
+    if args.profile:
+        run.settings.monitoring.profile_every_ms = PROFILE_EVERY_MS
+    return run
 
 
 def _each(args: argparse.Namespace, run_for: Callable[[Pipeline], Run]) -> int:
@@ -120,16 +139,16 @@ def _each(args: argparse.Namespace, run_for: Callable[[Pipeline], Run]) -> int:
     stated = [f"--{option.replace('_', '-')}" for option in args.one_pipeline if vars(args)[option]]
     if len(names) > 1 and stated:
         raise ConfigurationError(f"{', '.join(stated)} apply to one pipeline: name only that one")
-    runs = {name: run_for(Pipeline.get(name)) for name in names}
+    runs = {name: _profiled(run_for(Pipeline.get(name)), args) for name in names}
     with signals.intercepted_signals(), ThreadPoolExecutor(len(runs)) as pool:
         futures = {name: pool.submit(_outcome, run) for name, run in runs.items()}
     code = 0
     for name, future in futures.items():
-        outcome = future.result()
+        outcome, run_id = future.result(), runs[name].run_id
         if isinstance(outcome, Counter):
-            _log_success(f"{args.name} {name}", outcome)
+            _log_success(f"{args.name} {name}", outcome, run_id)
         else:
-            _log_failure(f"{args.name} {name}", outcome)
+            _log_failure(f"{args.name} {name}", outcome, run_id)
             code = code or exit_code(outcome)
     return code
 
@@ -178,17 +197,80 @@ def _ranges(
 
 
 def _status(args: argparse.Namespace) -> None:
-    names = [args.pipeline] if args.pipeline else sorted(Pipeline.registry)
-    frames: dict[str, tuple[pl.DataFrame, pl.DataFrame]] = {}
     rows = []
-    for name in names:
-        definition = Pipeline.get(name)
-        uri = RunSettings.of(name).monitoring.uri
-        if uri not in frames:
-            sink = Sink.resolve(uri)
-            frames[uri] = (sink.read(RunRecord), sink.read(LoadRecord))
-        rows.extend(status(definition, *frames[uri]))
+    for definition, _, (runs, loads) in _monitored(args.pipeline, RunRecord, LoadRecord):
+        rows.extend(status(definition, runs, loads))
     _print(rows, STATUS_COLUMNS)
+
+
+def _health(args: argparse.Namespace) -> int:
+    """Each signal as a log line (an alert event) and a table row; exit 6 when any."""
+    signals = []
+    records = (RunRecord, LoadRecord, StepRecord, ReconcileRecord)
+    for definition, settings, frames in _monitored(args.pipeline, *records):
+        runs, loads, steps, reconciliations = frames
+        signals.extend(health(definition, settings.health, runs, loads, steps, reconciliations))
+    for signal in signals:
+        LOGGER.log(
+            logging.ERROR if signal.level == "error" else logging.WARNING,
+            "%s%s %s: %s",
+            signal.pipeline,
+            f".{signal.resource}" if signal.resource else "",
+            signal.event,
+            signal.detail,
+            extra={"event": signal.event, "pipeline": signal.pipeline, "resource": signal.resource},
+        )
+    _print([signal.row() for signal in signals], HEALTH_COLUMNS)
+    return UNHEALTHY if signals else 0
+
+
+def _reconcile(args: argparse.Namespace) -> int:
+    """Count what the destination holds (and upstream, with ``--source``), record it in
+    ``reconciliations``, and show the totals and any window that disagrees."""
+    run = IncrementalRun(Pipeline.get(args.pipeline), args.resource)
+    records = reconcile(run, args.source)
+    run.sink.write(ReconcileRecord.name, ReconcileRecord.frame(records))
+    rows = [
+        {
+            "resource": record.resource_id.split(".", 1)[1],
+            "window": ReconcileRecord.window(
+                record.window_kind, record.window_start, record.window_end
+            ),
+            "rows": record.destination_rows,
+            "distinct_keys": record.distinct_keys,
+            "source_rows": record.source_rows,
+        }
+        for record in records
+        if record.window_kind == "all"
+        or (record.source_rows is not None and record.source_rows != record.destination_rows)
+    ]
+    _print(rows, RECONCILE_COLUMNS)
+    return 0
+
+
+def _compact(args: argparse.Namespace) -> None:
+    """Merge each monitoring frame's files, once per sink."""
+    uris = {RunSettings.of(name).monitoring.uri for name in sorted(Pipeline.registry)}
+    for uri in uris:
+        sink = Sink.resolve(uri)
+        for record in RECORDS:
+            if merged := sink.compact(record):
+                LOGGER.info("Compacted %s files of %s into one", merged, record.name)
+
+
+def _monitored(
+    pipeline: str | None, *records: type[Record]
+) -> Iterator[tuple[Pipeline, RunSettings, list[pl.DataFrame]]]:
+    """Each named pipeline (all when ``None``) with its settings and ``records`` frames, read
+    once per monitoring sink however many pipelines share it."""
+    read: dict[str, list[pl.DataFrame]] = {}
+    for name in [pipeline] if pipeline else sorted(Pipeline.registry):
+        settings = RunSettings.of(name)
+        uri = settings.monitoring.uri
+        if uri not in read:
+            sink = Sink.resolve(uri)
+            read[uri] = [sink.read(record) for record in records]
+        yield Pipeline.get(name), settings, read[uri]
 
 
 def _sink(definition: Pipeline) -> Sink:
@@ -219,37 +301,51 @@ def _target(args: argparse.Namespace) -> str:
     return " ".join([args.name, *names]).strip()
 
 
-def _log_success(target: str, rows: Counter[str]) -> None:
+def _log_success(target: str, rows: Counter[str], run_id: str | None) -> None:
     LOGGER.info(
         "%s succeeded: %s",
         target,
         summarise(rows),
-        extra={"event": "run_succeeded", "rows": rows.total()},
+        extra={"event": "run_succeeded", "rows": rows.total(), "run_id": run_id},
     )
 
 
-def _log_failure(target: str, error: BaseException) -> None:
-    """One line saying what failed and where, then the root cause's traceback.
+def _log_failure(target: str, error: BaseException, run_id: str | None = None) -> None:
+    """One line saying what failed, where, on what input, and in which run; then the root
+    cause's traceback, with its notes.
 
     A framework error raised by the framework itself is its own explanation and has no traceback;
-    anything else, including an unexpected bug (exit 1), keeps one.
+    anything else, including an unexpected bug (exit 1), keeps one. The traceback and every
+    other field are also in the run's ``failed`` monitoring row.
     """
     if isinstance(error, KeyboardInterrupt):
-        LOGGER.warning("%s interrupted", target, extra={"event": "run_interrupted"})
+        LOGGER.warning(
+            "%s interrupted", target, extra={"event": "run_interrupted", "run_id": run_id}
+        )
         return
     cause = root_cause(error)
     fields = error_fields(error)
     location = error.location if isinstance(error, RunError) else ""
+    where = f"; raised at {fields['error_where']}" if fields["error_where"] else ""
+    notes = f"; {fields['error_notes']}" if fields["error_notes"] else ""
     LOGGER.error(
-        "%s failed%s: %s (%s, exit %s)",
+        "%s failed%s: %s (%s, exit %s%s%s%s)",
         target,
         f" in {location}" if location else "",
         error,
         fields["error_type"],
         fields["exit_code"],
+        where,
+        notes,
+        f"; run {run_id}" if run_id else "",
         exc_info=None if isinstance(cause, RunError) else (type(cause), cause, cause.__traceback__),
-        extra={"event": "run_failed", **fields},
+        extra={"event": "run_failed", "run_id": run_id, **_logged(fields)},
     )
+
+
+def _logged(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """The error fields a log line carries: the traceback is logged as such, not as a field."""
+    return {key: value for key, value in fields.items() if key != "error_traceback"}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -267,13 +363,22 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("pipeline", nargs="?", help="build this one without extracting")
     status_ = command("status", _status, "last runs, cursors, and backfill coverage")
     status_.add_argument("pipeline", nargs="?", help="one pipeline; all when omitted")
+    health_ = command("health", _health, "what is wrong now: failed, lost, late, slow, unusual")
+    health_.add_argument("pipeline", nargs="?", help="one pipeline; all when omitted")
+    reconcile_ = command("reconcile", _reconcile, "count what the destination holds, per window")
+    reconcile_.add_argument("pipeline")
+    reconcile_.add_argument("--resource", action="append", help="only this resource; repeat")
+    reconcile_.add_argument("--source", action="store_true", help="count upstream too")
+    command("compact", _compact, "merge each monitoring frame's files into one")
     resource_help = "only this resource; repeat for several"
+    profile_help = "sample every thread's stack into the profiles frame (slower)"
 
     pipelines_help = "one or more; several run at once, in this process"
     run = command("run", _run, "load from the stored incremental cursors")
     run.set_defaults(one_pipeline=("resource", "allow_initial_load"))
     run.add_argument("pipelines", nargs="+", metavar="pipeline", help=pipelines_help)
     run.add_argument("--resource", action="append", help=resource_help)
+    run.add_argument("--profile", action="store_true", help=profile_help)
     run.add_argument(
         "--allow-initial-load",
         action="store_true",
@@ -284,6 +389,7 @@ def _parser() -> argparse.ArgumentParser:
     backfill.set_defaults(one_pipeline=("resource",))  # --from and --to need one --resource
     backfill.add_argument("pipelines", nargs="+", metavar="pipeline", help=pipelines_help)
     backfill.add_argument("--resource", action="append", help=resource_help)
+    backfill.add_argument("--profile", action="store_true", help=profile_help)
     backfill.add_argument("--from", dest="start", help="first window edge, e.g. a logged end")
     backfill.add_argument("--to", dest="end", help="stop before this edge")
     backfill.add_argument(
@@ -294,7 +400,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def entrypoint() -> None:
     try:
-        logs.configure(resolve(LoggingSettings(), "logging"))
+        logs.configure(resolve(LoggingSettings(), "logging"), resolve(AlertSettings(), "alerts"))
     except ConfigurationError as error:
         print(f"pipeline: {error}", file=sys.stderr)
         raise SystemExit(error.exit_code) from None

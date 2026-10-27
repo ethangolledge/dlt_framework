@@ -32,6 +32,11 @@ class Sink(ABC):
     def read(self, record: type[Record]) -> pl.DataFrame:
         """Everything written for ``record``, with its schema; empty before the first write."""
 
+    def compact(self, record: type[Record]) -> int:
+        """Merge what was written for ``record`` into fewer, larger pieces; returns how many
+        pieces were merged. A sink that appends in place has nothing to do."""
+        return 0
+
     @staticmethod
     def resolve(uri: str) -> "Sink":
         """The sink registered for ``uri``'s scheme, e.g. ``s3://...`` or ``postgresql://...``.
@@ -66,10 +71,27 @@ class ParquetSink(Sink):
         with self.fs.open(f"{folder}/{uuid.uuid4().hex}.parquet", "wb") as file:
             frame.write_parquet(file)
 
+    def compact(self, record: type[Record]) -> int:
+        """Rewrite the frame's files as one, then delete them. Files written meanwhile are not
+        among those read, so they are kept; a crash between the two steps leaves duplicates, never
+        a loss, and the next compaction keeps one of each (records are immutable)."""
+        files = self._files(record)
+        if len(files) < 2:
+            return 0
+        self.write(record.name, self._scan(record, files).unique(maintain_order=True))
+        self.fs.rm(files)
+        return len(files)
+
     def read(self, record: type[Record]) -> pl.DataFrame:
-        files = self.fs.glob(f"{self.root}/{record.name}/*.parquet")
+        files = self._files(record)
         if not files:
             return record.frame([])
+        return self._scan(record, files)
+
+    def _files(self, record: type[Record]) -> list[str]:
+        return list(self.fs.glob(f"{self.root}/{record.name}/*.parquet"))
+
+    def _scan(self, record: type[Record], files: list[str]) -> pl.DataFrame:
         # Files written before a column existed read it as null.
         return pl.scan_parquet(
             [self.fs.unstrip_protocol(file) for file in files],

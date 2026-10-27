@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import dlt
+from dlt.common.configuration.specs import ConnectionStringCredentials
 from dlt.extract.resource import DltResource
 from dlt.sources.sql_database import sql_table
 from dlt.sources.sql_database.helpers import TableBackend
-from sqlalchemy import Table, make_url
+from sqlalchemy import MetaData, Table, create_engine, func, make_url, select
+from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import Select
 
 from dlt_framework.core.backfill import RowBackfill
@@ -148,6 +150,23 @@ class SqlSource(Source[dict[str, Any]]):
             **options,
         ).with_name(resource.name)
 
+    def count(self, resource: Resource, window: Window | None) -> int | None:
+        """``COUNT(*)`` of the upstream table, within the window's cursor bounds; table and query
+        adapters in the config are not applied, so it counts what the table holds."""
+        config, cursor = self.resources[resource], resource.cursor
+        credentials = dlt.secrets[f"sources.{self.name}.credentials"]
+        engine = create_engine(_url(credentials), poolclass=NullPool)
+        try:
+            table = Table(config.get("table", resource.name), MetaData(), autoload_with=engine)
+            query = select(func.count()).select_from(table)
+            if cursor is not None and window is not None and (bounds := cursor.bounds(window)):
+                column = table.c[cursor.path]
+                query = query.where(column >= bounds[0], column < bounds[1])
+            with engine.connect() as connection:
+                return int(connection.execute(query).scalar_one())
+        finally:
+            engine.dispose()
+
     @staticmethod
     def _page(order_by: Sequence[str], window: RowWindow) -> Callable[[Select[Any], Table], Any]:
         def page(query: Select[Any], table: Table) -> Select[Any]:
@@ -155,3 +174,10 @@ class SqlSource(Source[dict[str, Any]]):
             return query.order_by(*columns).offset(window.offset).limit(window.size)
 
         return page
+
+
+def _url(credentials: Any) -> str:
+    """A SQLAlchemy URL from what ``sources.<name>.credentials`` holds: a URL, or its parts."""
+    if isinstance(credentials, str):
+        return credentials
+    return ConnectionStringCredentials(credentials).to_native_representation()

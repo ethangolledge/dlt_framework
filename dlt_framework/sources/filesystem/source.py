@@ -59,8 +59,12 @@ class Csv(Reader):
 
             with duckdb.connect() as connection:
                 for item in items:
-                    with item.open() as file:
-                        yield from fetch(connection.from_csv_auto(file, **options), chunk_size)
+                    try:
+                        with item.open() as file:
+                            yield from fetch(connection.from_csv_auto(file, **options), chunk_size)
+                    except Exception as error:  # DuckDB names the file only by an internal id
+                        error.add_note(f"while reading {item['file_url']}")
+                        raise
 
         return read_csv
 

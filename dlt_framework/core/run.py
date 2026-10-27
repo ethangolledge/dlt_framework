@@ -12,7 +12,6 @@ destination's committed state stays the truth, so the same rows are extracted ag
 
 import fcntl
 import logging
-import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -27,6 +26,7 @@ import dlt
 from dlt.common.pipeline import ExtractInfo
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 
+from dlt_framework.core import logs
 from dlt_framework.core.errors import (
     ConfigurationError,
     DefinitionError,
@@ -65,6 +65,7 @@ class Run(ABC):
         self.resources = self._select(resources)
         self.settings = RunSettings.of(definition.name)
         self.sink = Sink.resolve(self.settings.monitoring.uri)
+        self.run_id: str | None = None  # the monitoring run id, once started
 
     @property
     def name(self) -> str:
@@ -75,6 +76,14 @@ class Run(ABC):
         """``<dataset>_staging_<mode>_<pipeline>``: one staging dataset per run name. Built from
         the mode, not ``name``, because dlt folds the ``__`` in ``<name>__backfill`` to ``_``."""
         return f"%s_staging_{self.mode}_{self.definition.name}"
+
+    def dlt_pipeline(self) -> dlt.Pipeline:
+        """The dlt pipeline this run loads with: its name, destination, and dataset."""
+        return dlt.pipeline(
+            pipeline_name=self.name,
+            destination=self.definition.target.factory(self.staging_layout),
+            dataset_name=self.definition.target.dataset,
+        )
 
     @abstractmethod
     def units(self) -> Iterable[Unit]:
@@ -97,20 +106,16 @@ class Run(ABC):
             dlt_pipeline=self.name,
             mode=self.mode,
         )
-        with monitor:
+        self.run_id = monitor.run_id
+        with monitor, logs.bound(run_id=monitor.run_id, pipeline=self.name, mode=self.mode):
             try:
-                pipeline = dlt.pipeline(
-                    pipeline_name=self.name,
-                    destination=self.definition.target.factory(self.staging_layout),
-                    dataset_name=self.definition.target.dataset,
-                )
+                pipeline = self.dlt_pipeline()
                 with PipelineLock(pipeline.pipelines_dir, self.name):
-                    self._prepare(pipeline)
+                    monitor.lost()
+                    self._prepare(pipeline, monitor)
                     for resources, windows in self.units():
-                        for index, window in enumerate(windows):
-                            loaded, more = self._load(
-                                pipeline, resources, window, monitor, first=index == 0
-                            )
+                        for part, window in enumerate(windows):
+                            loaded, more = self._load(pipeline, resources, window, monitor, part)
                             rows.update(loaded)
                             if not more:
                                 break
@@ -130,13 +135,12 @@ class Run(ABC):
             )
         return tuple(declared[name] for name in dict.fromkeys(names))
 
-    def _prepare(self, pipeline: dlt.Pipeline) -> None:
-        retry = self.settings.retry
-        retry("sync", pipeline.sync_destination)
+    def _prepare(self, pipeline: dlt.Pipeline, monitor: Monitor) -> None:
+        self._step(monitor, "sync", pipeline.sync_destination)
         if pipeline.has_pending_data:
-            LOGGER.warning("Loading pending packages from an interrupted run", extra=self._log())
+            LOGGER.warning("Loading pending packages from an interrupted run")
             with self._kept_or_discarded(pipeline):
-                retry("pending", lambda: self._loading(lambda: pipeline.run([])))
+                self._step(monitor, "pending", lambda: self._loading(lambda: pipeline.run([])))
         self.check(pipeline)
 
     def _load(
@@ -145,31 +149,47 @@ class Run(ABC):
         resources: tuple[Resource, ...],
         window: Window | None,
         monitor: Monitor,
-        first: bool,
+        part: int,
     ) -> tuple[Counter[str], bool]:
         """One extract, normalize, and load, committed; returns the rows loaded and whether the
-        unit continues: the window is not the last, or a chunk stopped before upstream ran out."""
-        timings: dict[str, float] = {}
+        unit continues: the window is not the last, or a chunk stopped before upstream ran out.
+        ``part`` numbers the loads of a unit: only the first is held to the empty policy."""
+        source = self.definition.source
+        before = {
+            resource.name: stored_cursor(pipeline, source, resource) for resource in resources
+        }
         try:
-            info, extraction = self._timed(
-                timings, "extract", lambda: self._extract(pipeline, resources, window)
+            extracted, extraction = self._step(
+                monitor, "extract", lambda: self._extract(pipeline, resources, window), resources
             )
             with self._kept_or_discarded(pipeline):
-                (load_id,) = info.loads_ids  # one source extracted, so one package
-                rows = self._row_counts(info, resources)
-                self._check_extracted(pipeline, resources, rows, first)
-                self._timed(timings, "normalize", pipeline.normalize)
-                self._timed(timings, "load", lambda: self._loading(pipeline.load))
+                (load_id,) = extracted.loads_ids  # one source extracted, so one package
+                rows = self._row_counts(extracted, resources)
+                with logs.bound(load_id=load_id):
+                    self._check_extracted(pipeline, resources, rows, first=part == 0)
+                    normalized = self._step(monitor, "normalize", pipeline.normalize, resources)
+                    loaded = self._step(
+                        monitor, "load", lambda: self._loading(pipeline.load), resources
+                    )
             extraction.committed()
         except RunError as error:
             error.locate(
                 ", ".join(resource.name for resource in resources), str(window or "increment")
             )
             raise
-        for resource in resources:
-            cursor = stored_cursor(pipeline, self.definition.source, resource)
-            monitor.loaded(resource, window, load_id, rows[resource.name], timings, cursor)
-        LOGGER.info("Loaded %s: %s", window or "increment", dict(rows), extra=self._log())
+        cursors = {
+            resource.name: (before[resource.name], stored_cursor(pipeline, source, resource))
+            for resource in resources
+        }
+        monitor.loaded(
+            pipeline.default_schema,
+            resources,
+            window,
+            part,
+            (extracted, normalized, loaded),
+            cursors,
+        )
+        LOGGER.info("Loaded %s: %s", window or "increment", dict(rows), extra={"load_id": load_id})
         if window is None:
             return rows, extraction.cut
         return rows, not window.is_last(sum(rows.values()))
@@ -200,8 +220,7 @@ class Run(ABC):
             pipeline.drop()
             LOGGER.warning(
                 "Discarded the extracted package and local state; the destination's committed "
-                "state is kept, so the next run extracts these rows again",
-                extra=self._log(),
+                "state is kept, so the next run extracts these rows again"
             )
             raise
 
@@ -222,7 +241,7 @@ class Run(ABC):
             if rows[resource.name] or resource.empty == "allow":
                 continue
             if resource.empty == "warn":
-                LOGGER.warning("%s extracted no rows", resource.name, extra=self._log())
+                LOGGER.warning("%s extracted no rows", resource.name)
                 continue
             raise GuardError(
                 f"{resource.name} extracted no rows and its empty policy is 'fail'; nothing was "
@@ -260,14 +279,15 @@ class Run(ABC):
         with self.definition.target.loading():
             return call()
 
-    def _timed(self, timings: dict[str, float], step: str, call: Callable[[], T]) -> T:
-        started = time.monotonic()
-        result = self.settings.retry(step, call)
-        timings[step] = time.monotonic() - started
-        return result
-
-    def _log(self) -> dict[str, str]:
-        return {"pipeline": self.name, "mode": self.mode}
+    def _step(
+        self,
+        monitor: Monitor,
+        step: str,
+        call: Callable[[], T],
+        resources: Iterable[Resource] = (),
+    ) -> T:
+        """``call`` under the retry policy, each attempt recorded by the monitor."""
+        return self.settings.retry(step, monitor.attempts(step, call, resources))
 
     @staticmethod
     def _row_counts(info: ExtractInfo, resources: Iterable[Resource]) -> Counter[str]:

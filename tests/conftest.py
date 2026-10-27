@@ -24,6 +24,7 @@ from dlt_framework.core import (
     ValueCursor,
 )
 from dlt_framework.core.monitoring import ParquetSink
+from dlt_framework.core.settings import HealthSettings
 from dlt_framework.core.source import Source
 from dlt_framework.core.windows import RowWindow
 from dlt_framework.sources.custom import CustomSource
@@ -50,6 +51,14 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
 
 
 RETRY = {"attempts": 1, "initial_wait_s": 0, "max_wait_s": 0, "give_up_after_s": 60}
+HEALTH = HealthSettings(
+    history_runs=20,
+    expect_every_s=0,
+    stale_after_intervals=2.0,
+    slow_after=1.5,
+    rows_spike=10.0,
+    memory_headroom=0.2,
+)
 
 
 @pytest.fixture

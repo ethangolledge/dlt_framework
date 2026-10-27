@@ -15,7 +15,7 @@ dlt_framework/
     settings.py         what config.toml must state: retry, monitoring, guards, logging
     run.py              the run spine: incremental runs, backfills, guards, rollback
     buckets.py          folders and buckets by URL, with one credentials setting
-    monitoring/         run, load and resource frames, sinks, coverage, status
+    monitoring/         frames, the monitor, sampler, profiler, sinks, coverage, status, health
   sources/
     rest/               RestApiSource       + pipelines/ defined on it
     sql/                SqlSource           (SQL Server, Postgres, ...)
@@ -183,9 +183,12 @@ registered class; nothing in core changes.
 ```text
 pipeline list                                             pipelines ready to run here
 pipeline check [NAME]                                     readiness of every pipeline, or one built offline
-pipeline run NAME [NAME ...] [--resource R ...] [--allow-initial-load]
-pipeline backfill NAME [NAME ...] [--resource R ...] [--from X] [--to Y] [--missing]
+pipeline run NAME [NAME ...] [--resource R ...] [--allow-initial-load] [--profile]
+pipeline backfill NAME [NAME ...] [--resource R ...] [--from X] [--to Y] [--missing] [--profile]
 pipeline status [NAME]                                    last runs, cursors, backfill coverage
+pipeline health [NAME]                                    what is wrong now; exit 6 if anything
+pipeline reconcile NAME [--resource R ...] [--source]     count what the destination holds
+pipeline compact                                          merge monitoring files
 ```
 
 - **run** loads resources (all, or each `--resource`) from their stored cursors under pipeline
@@ -209,6 +212,19 @@ pipeline status [NAME]                                    last runs, cursors, ba
   - backfill coverage: % of the declared history, the number of gaps, and the first gap.
 
   It reads monitoring only, never the destination.
+- **health** judges each pipeline's latest run against its own history and lists what is wrong
+  now (Monitoring: Health). Each finding is also an `ERROR`/`WARNING` log line with an `event`
+  field, and the command exits 6 when there are any, so a scheduled `pipeline health` is an
+  alert by itself.
+- **reconcile** counts the destination's rows, distinct primary keys, and rows per declared
+  backfill window, and with `--source` the source's own counts where it can give them (SQL).
+  Counts go to the `reconciliations` frame; the totals and any window that disagrees are printed.
+  It extracts and loads nothing.
+- **compact** rewrites each Parquet monitoring frame as one file, deleting the files it read
+  (files written meanwhile are kept). Run it on a schedule, or before loading the frames into a
+  database.
+- **--profile** samples every thread's stack every 10 ms into the `profiles` frame, for one run.
+  It slows the run a little.
 
 ## Guarantees
 
@@ -280,15 +296,25 @@ Exit codes:
 | `3` | terminal failure |
 | `4` | transient retries exhausted |
 | `5` | out of memory (Python `MemoryError`, or the database's own limit; never retried) |
+| `6` | `pipeline health` found something wrong |
 | `130` | interrupted |
 | `137` | not raised by the framework: Docker or the kernel OOM-killed the container (see Monitoring) |
 
-A failure is one line saying what failed, where, and the root cause, followed by the root cause's
-traceback:
+A failure is one line saying what failed, where, on what input, and in which run, followed by
+the root cause's traceback with its notes:
 
 ```
-ERROR dlt_framework.cli: run acme_shop failed in extract of orders, window time [2025-01-01T00:00:00+00:00, 2025-02-01T00:00:00+00:00): HTTPError: 401 Client Error: Unauthorized ... (TerminalRunError, exit 3)
+ERROR dlt_framework.cli: run sec_insider failed in extract of insider_owner_signature, window increment: OSError: Invalid Input Error: CSV Error on Line: 53542 ... (TerminalRunError, exit 3; raised at dlt_framework/sources/filesystem/source.py:63 in read_csv; while reading file:///data/landing/sec_insider/owner_signature/2016q1.tsv; run 3f9fe3f6...)
 ```
+
+- **The resource that broke.** Resources extract together; the failure names the one dlt
+  reports, not all of them.
+- **The input.** A source adds what it was reading where the error itself does not say (the
+  CSV reader adds the file; dlt's HTTP and SQL errors already name the URL or table).
+- **The same in monitoring.** The `failed` row of `runs` holds every field, the chain of causes,
+  and the redacted traceback, so a dashboard shows a failure without container logs.
+- **Every line names its run.** Lines logged during a run carry `run_id` (and `load_id` during a
+  load), in brackets in the text format and as fields in JSON, to join logs to monitoring.
 
 - **One handler for every line.** dlt's own logger is set to `WARNING` and shares the framework's
   handler, so `[logging] format` controls every line.
@@ -308,25 +334,72 @@ ERROR dlt_framework.cli: run acme_shop failed in extract of orders, window time 
 ## Monitoring
 
 Every run writes append-only Polars frames to the monitoring sink stated for the environment.
-They form a star schema with readable, deterministic keys:
+Measures are taken around the code, never inside it: the run hands each step and dlt's own
+step results to the monitor, which samples the process from a thread of its own. They form a
+star schema with readable, deterministic keys:
 
 | Frame | One row per | Keys | Answers |
 | --- | --- | --- | --- |
 | `pipelines` | pipeline, per run | `pipeline_id`, `run_id` | Source type and name, destination, dataset |
 | `resources` | resource, per run | `resource_id`, `pipeline_id`, `run_id` | Write mode, cursor kind/path/start, backfill kind, empty policy, full definition |
-| `runs` | `started` / `succeeded` / `failed` event | `run_id`, `pipeline_id` | When, mode, outcome, exit code, error type/step/resource/window/root cause, rows, peak RSS vs container memory limit, CPU seconds |
-| `loads` | resource × window | `load_id`, `resource_id`, `run_id` | Rows, step seconds, window bounds, the cursor's value after the load (readable: ISO or integer) |
-| `samples` | resource sample | `run_id` | RSS, CPU % (of one core), container memory limit over time |
+| `runs` | `started` / `succeeded` / `failed` / `lost` event | `run_id`, `pipeline_id` | When, mode, outcome, duration, exit code, rows, peak RSS against the container limit or host memory, CPU seconds, code version; on failure the type, step, resource, window, root cause, where it was raised, input notes, cause chain, and traceback |
+| `steps` | step attempt (`sync`, `pending`, `extract`, `normalize`, `load`) | `run_id`, `load_id` | Wall and CPU seconds, attempt number, outcome and cause: retries, and whether a slow step was computing or waiting |
+| `loads` | resource × load | `load_id`, `resource_id`, `run_id` | Rows, nested rows, bytes, the resource's own extract span, window bounds, part (chunk or window number), the cursor before and after |
+| `tables` | destination table × load | `load_id`, `resource_id`, `table` | Rows, bytes, load jobs, retries, and load seconds per table, nested tables included |
+| `samples` | moment of a run | `run_id` | RSS, CPU %, threads, IO MB/s, container limit, host memory free, and the step and resources running |
+| `profiles` | function × step of a profiled run | `run_id` | Own and total stack samples, and their share of the step |
+| `reconciliations` | resource (and backfill window) × `pipeline reconcile` | `reconcile_id`, `resource_id` | Destination rows and distinct keys, against the source's count |
 
 - **The keys.** `pipeline_id` is the pipeline name; `resource_id` is `<pipeline_id>.<resource>`;
-  `run_id` is generated per run.
+  `run_id` is generated per run and is on every log line of it.
 - **`load_id` links to the destination.** It is dlt's load id, the same value as
   `_dlt_loads.load_id` and `_dlt_load_id` on every row in the destination.
 - **Definitions are written every run.** Join on `(run_id, resource_id)` for a resource as it was
   in that run, or keep the latest row per `resource_id` for a one-row-per-key dimension.
-- **Killed runs leave a trace.** Records are written as they happen, so a container killed
-  mid-run still leaves its `started` row and its memory trend, and `pipeline status` shows the run
-  as `lost or running`.
+- **Busy or waiting.** A step's `cpu_s / duration_s` near 1 (or above, on several cores) is our
+  code or dlt computing; near 0 it waited, on upstream in extract (a slow query, a missing index,
+  a rate limit) or on the destination in load. `tables.load_s` then says which table.
+- **Killed runs leave a trace.** Records are written as they happen, and while memory is above
+  70% of the limit every sample is written at once, so a container killed for memory leaves its
+  `started` row and its last minute. The next run of that pipeline writes a `lost` row for it,
+  with its duration, peak memory, and the step it was in, and logs a `run_lost` warning.
+- **Process-wide measures.** CPU, memory, and IO are the process's: pipelines run together in
+  one process share them.
+- **`code_version`** comes from `[monitoring] code_version`; set `MONITORING__CODE_VERSION` to the
+  image tag or git SHA per build, so a change in behaviour can be traced to a release.
+
+### Health
+
+`pipeline health` reports, from the frames alone, each pipeline's state now. Thresholds are in
+`[health]`, overridable per pipeline (`[pipelines.<name>.health]`):
+
+| Event | Level | When |
+| --- | --- | --- |
+| `run_failed` | error | The latest run failed (with how many in a row) |
+| `run_lost` | error | The latest run was killed |
+| `run_stale` | error | No success for `stale_after_intervals` × the expected gap: `expect_every_s`, or, once there are five, the median gap between successes |
+| `run_slow` | warning | The latest success took over `slow_after` × the p95 of recent ones |
+| `rows_anomaly` | warning | A resource loaded none where it usually loads some (unless its empty policy is `allow`), or over `rows_spike` × its median |
+| `memory_high` | warning | The latest run's peak left under `memory_headroom` of its memory |
+| `retries_rising` | warning | A step was retried in 3 of the last 5 runs |
+| `coverage_gap` | warning | Declared backfill history has a gap |
+| `reconcile_mismatch` | warning | The latest reconciliation found duplicate keys, or counts that differ from the source |
+
+### Alerts
+
+Alerting belongs to the orchestrator: it sees what a process cannot report (an OOM kill, a job
+that never started) and can alert on exit codes and on the `event` field of log lines. Where
+there is none, `[alerts]` posts those events to one webhook, chosen in config, so the code knows
+no service. It is off until `ALERTS__WEBHOOK_URL` (a secret) is set. `body` is a template of the
+log line's fields, JSON-escaped and redacted; for Telegram:
+
+```toml
+[alerts]   # ALERTS__WEBHOOK_URL=https://api.telegram.org/bot<token>/sendMessage
+body = '{"chat_id": "<chat>", "text": "$level $pipeline $event: $message"}'
+```
+
+Posting happens on a background thread, at most once per pipeline and event per `cooldown_s`, and
+a failed post is one line on stderr (never the URL) that never fails a run.
 
 ## Scraping
 
