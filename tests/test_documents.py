@@ -10,14 +10,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from conftest import define
 from pydantic import BaseModel
 
 from dlt_framework.cli import main
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES,
     Append,
     AwareDatetime,
-    DuckDb,
     Merge,
     Pipeline,
     Resource,
@@ -128,12 +127,7 @@ def pipeline(folder, extract, on_invalid="raise", once_loaded=KEEP, ocr=None) ->
         schema=Invoice, extract=extract, on_invalid=on_invalid, once_loaded=once_loaded, ocr=ocr
     )
     files = Files(bucket_url=folder.as_uri(), file_glob="*.pdf", reader=reader)
-    return Pipeline(
-        name="docs",
-        target=DuckDb(dataset="raw_docs"),
-        schema_contract=FREEZE_DATA_TYPES,
-        source=FilesystemSource(name="docs", resources={resource: files}),
-    )
+    return define("docs", FilesystemSource(name="docs", resources={resource: files}), "raw_docs")
 
 
 @pytest.fixture
@@ -240,16 +234,9 @@ def test_a_crawl_downloads_documents_that_are_then_extracted_and_removed(
         async def download(self, response):
             yield {"url": response.url, "saved_as": await self.save(response)}
 
-    crawl = Pipeline(
-        name="filings",
-        target=DuckDb(dataset="raw_filings"),
-        schema_contract=FREEZE_DATA_TYPES,
-        source=ScrapeSource(
-            name="filings",
-            resources={
-                Resource(name="filings", write=Append(), cursor=None, empty="fail"): Filings
-            },
-        ),
+    filings = Resource(name="filings", write=Append(), cursor=None, empty="fail")
+    crawl = define(
+        "filings", ScrapeSource(name="filings", resources={filings: Filings}), "raw_filings"
     )
     assert IncrementalRun(crawl)() == {"filings": 1}
     assert IncrementalRun(pipeline(folder, (ACME,), once_loaded=Delete()))() == {"invoices": 1}
@@ -303,12 +290,7 @@ def sharing(name: str, folders: dict[str, Path], reader: Documents) -> Pipeline:
         ): Files(bucket_url=folder.as_uri(), file_glob="*.pdf", reader=reader)
         for resource, folder in folders.items()
     }
-    return Pipeline(
-        name=name,
-        target=DuckDb(dataset=f"raw_{name}"),
-        schema_contract=FREEZE_DATA_TYPES,
-        source=FilesystemSource(name=name, resources=files),
-    )
+    return define(name, FilesystemSource(name=name, resources=files), f"raw_{name}")
 
 
 def test_a_failed_run_keeps_its_files_while_another_sharing_its_reader_commits(tmp_path) -> None:

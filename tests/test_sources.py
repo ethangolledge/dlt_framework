@@ -1,22 +1,18 @@
 """Each source type proves its cursors and windows reach the upstream request (guard G2)."""
 
-import importlib.util
 import json
 import os
-import sqlite3
-from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
+from conftest import define
 from requests.adapters import BaseAdapter
 
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES,
     Append,
     AwareDatetime,
-    DuckDb,
     Duration,
     Integer,
     IsoTimestamp,
@@ -34,26 +30,9 @@ from dlt_framework.core.errors import DefinitionError, GuardError
 from dlt_framework.core.run import BackfillRun, IncrementalRun
 from dlt_framework.sources.filesystem import Csv, Files, FilesystemSource
 from dlt_framework.sources.rest import RestApiSource
-from dlt_framework.sources.sql import ConnectorX, PyArrow, SqlAlchemy, SqlSource
+from dlt_framework.sources.sql import ConnectorX, SqlAlchemy, SqlSource
 
-
-def needs(*modules: str) -> pytest.MarkDecorator:
-    """Skip unless ``modules`` (an extra's libraries) are installed."""
-    missing = [module for module in modules if importlib.util.find_spec(module) is None]
-    return pytest.mark.skipif(bool(missing), reason=f"needs {missing}")
-
-
-UTC = UTC
 MERGE = Merge(primary_key=("id",), strategy="delete-insert")
-
-
-def define(name: str, source) -> Pipeline:
-    return Pipeline(
-        name=name,
-        target=DuckDb(dataset="raw_shop"),
-        schema_contract=FREEZE_DATA_TYPES,
-        source=source,
-    )
 
 
 class RecordingAdapter(BaseAdapter):
@@ -139,15 +118,14 @@ def test_rest_row_backfill_sends_offset_and_limit() -> None:
 
 
 @pytest.fixture
-def erp(tmp_path, monkeypatch) -> None:
+def erp(sqlite) -> None:
     """A SQLite source table of five orders."""
-    database = tmp_path / "erp.sqlite"
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("CREATE TABLE Orders (id INTEGER PRIMARY KEY, version INTEGER)")
-        connection.executemany(
-            "INSERT INTO Orders VALUES (?, ?)", [(i, i * 10) for i in range(1, 6)]
-        )
-    monkeypatch.setenv("SOURCES__ERP__CREDENTIALS", f"sqlite:///{database}")
+    sqlite(
+        "erp",
+        "Orders",
+        "id INTEGER PRIMARY KEY, version INTEGER",
+        [(i, i * 10) for i in range(1, 6)],
+    )
 
 
 def sql_pipeline(resource: Resource, **config) -> Pipeline:
@@ -212,16 +190,10 @@ def test_append_resource_without_cursor_loads_everything(erp, query) -> None:
 
 
 @pytest.fixture
-def ledger(tmp_path, monkeypatch) -> None:
+def ledger(sqlite) -> None:
     """A SQL Server-style table: ``rv`` holds a rowversion, 8 big-endian bytes."""
-    database = tmp_path / "ledger.sqlite"
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("CREATE TABLE Ledger (id INTEGER PRIMARY KEY, rv BLOB NOT NULL)")
-        connection.executemany(
-            "INSERT INTO Ledger VALUES (?, ?)",
-            [(i, (1000 + i).to_bytes(8, "big")) for i in range(1, 7)],
-        )
-    monkeypatch.setenv("SOURCES__LEDGER__CREDENTIALS", f"sqlite:///{database}")
+    rows = [(i, (1000 + i).to_bytes(8, "big")) for i in range(1, 7)]
+    sqlite("ledger", "Ledger", "id INTEGER PRIMARY KEY, rv BLOB NOT NULL", rows)
 
 
 def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, query, frames) -> None:
@@ -244,13 +216,6 @@ def test_sql_rowversion_runs_and_backfills_by_the_integer_it_encodes(ledger, que
     assert increments["cursor_last_value"].to_list() == ["1006"]  # readable, not b'\\x00...'
 
 
-BACKENDS = [
-    pytest.param(backend, marks=needs(*backend.requires()))
-    for backend in (SqlAlchemy(), PyArrow(), ConnectorX())
-]
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
 def test_sql_backends_load_the_same_rows_and_cursor(erp, query, frames, backend) -> None:
     resource = Resource(
         name="orders",

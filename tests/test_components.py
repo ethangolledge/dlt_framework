@@ -1,9 +1,9 @@
 from datetime import UTC, date, datetime
 
 import pytest
+from conftest import define
 
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES,
     Append,
     AwareDatetime,
     DateOnly,
@@ -170,19 +170,12 @@ def test_write_modes() -> None:
 
 
 def test_pipeline_names_are_unique_and_cannot_mimic_backfills() -> None:
-    def define(name: str) -> Pipeline:
-        return Pipeline(
-            name=name,
-            source=CustomSource(name="s", resources={}),
-            target=DuckDb(dataset="raw"),
-            schema_contract=FREEZE_DATA_TYPES,
-        )
-
-    define("shop")
+    source = CustomSource(name="s", resources={})
+    define("shop", source)
     with pytest.raises(DefinitionError):
-        define("shop")
+        define("shop", source)
     with pytest.raises(DefinitionError):
-        define("shop__backfill")
+        define("shop__backfill", source)
     with pytest.raises(DefinitionError):
         Pipeline.get("missing")
 

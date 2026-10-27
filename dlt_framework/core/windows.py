@@ -19,6 +19,9 @@ from dlt_framework.core.errors import DefinitionError
 
 class Window(ABC):
     kind: ClassVar[str]
+    positional: ClassVar[bool] = False
+    """Whether the window counts rows rather than bounding a cursor: the source pages through it,
+    and no cursor filters on it."""
 
     @property
     @abstractmethod
@@ -111,6 +114,7 @@ class RowWindow(Window):
     """``size`` rows starting at row ``offset`` of a stable ordering; for sources with no cursor."""
 
     kind: ClassVar[str] = "rows"
+    positional: ClassVar[bool] = True
 
     offset: int
     size: int

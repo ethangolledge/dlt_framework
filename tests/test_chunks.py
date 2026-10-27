@@ -3,9 +3,7 @@ its rows and cursor, for every source type and cursor format, and lands every ro
 
 import json
 import os
-import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -15,10 +13,8 @@ import pyarrow as pa
 import pytest
 import requests
 import sqlalchemy
-from conftest import Site
+from conftest import Site, define, listing, spider
 from requests.adapters import BaseAdapter
-from test_scrape import listing, spider
-from test_sources import BACKENDS, define
 
 from dlt_framework.core import (
     Append,
@@ -124,6 +120,17 @@ def increments(frames) -> list[int]:
     return loads.filter(loads["window_kind"] == "increment")["rows"].to_list()
 
 
+def assert_chunked(loads: list[int], total: int, chunk: int, page: int) -> None:
+    """``total`` rows landed over several loads, each bounded as a chunk promises: every load but
+    the last reached ``chunk`` new rows within one ``page`` of it (pages are never split), and the
+    last fell short, which is how the run knew upstream had run out."""
+    *full, last = loads
+    assert full, f"one load of {loads}: nothing was chunked"
+    assert all(chunk <= rows < chunk + page for rows in full), loads
+    assert last < chunk, loads
+    assert sum(loads) == total, loads
+
+
 @pytest.mark.parametrize("shape", ["row", "page", "arrow"])
 @pytest.mark.parametrize("name", FORMATS)
 def test_every_cursor_format_and_item_shape_loads_each_row_once(
@@ -137,7 +144,7 @@ def test_every_cursor_format_and_item_shape_loads_each_row_once(
 
     assert IncrementalRun(definition)()["orders"] == len(STEPS)
     assert ids(query) == list(range(len(STEPS)))
-    assert len(increments(frames)) > 2 and sum(increments(frames)) == len(STEPS)
+    assert_chunked(increments(frames), len(STEPS), chunk=3, page=1 if shape == "row" else 2)
     assert upstream.starts == sorted(upstream.starts)  # each chunk starts where one ended
 
     assert IncrementalRun(definition)()["orders"] == 0  # nothing new, and nothing repeated
@@ -158,14 +165,21 @@ def test_a_failed_chunk_keeps_the_chunks_before_it(make_pipeline, query) -> None
     assert ids(query) == list(range(len(STEPS)))
 
 
-def test_whole_and_chunked_resources_load_in_one_run(make_pipeline, query) -> None:
+def test_whole_and_chunked_resources_load_in_one_run(make_pipeline, frames) -> None:
     customers = Resource(name="customers", write=Replace(), cursor=None, empty="fail")
     whole = Ascending([{"id": 1, "updated_at": 0}])
     orders = Ascending([{"id": i, "updated_at": 100 + k} for i, k in enumerate(STEPS)])
     definition = make_pipeline({customers: whole, chunked(value_cursor(Integer())): orders})
 
     assert IncrementalRun(definition)() == {"customers": 1, "orders": len(STEPS)}
-    assert len(whole.starts) == 1 and len(orders.starts) > 2
+    assert len(whole.starts) == 1  # the whole resource is extracted once, not with every chunk
+    loads = frames("loads")
+    rows = {
+        key: loads.filter(loads["resource_id"] == f"shop.{key}")["rows"].to_list()
+        for key in ("customers", "orders")
+    }
+    assert rows["customers"] == [1]
+    assert_chunked(rows["orders"], len(STEPS), chunk=3, page=2)
 
 
 def test_only_the_first_chunk_is_held_to_the_empty_policy(make_pipeline) -> None:
@@ -231,16 +245,10 @@ def statements() -> Iterator[list[str]]:
 
 
 @pytest.fixture
-def warehouse(tmp_path, monkeypatch) -> None:
+def warehouse(sqlite) -> None:
     """A SQLite table whose rows share cursor values, with an integer and a rowversion cursor."""
-    database = tmp_path / "erp.sqlite"
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("CREATE TABLE Orders (id INTEGER PRIMARY KEY, version INTEGER, rv BLOB)")
-        connection.executemany(
-            "INSERT INTO Orders VALUES (?, ?, ?)",
-            [(i, 100 + k, (100 + k).to_bytes(8, "big")) for i, k in enumerate(STEPS)],
-        )
-    monkeypatch.setenv("SOURCES__ERP__CREDENTIALS", f"sqlite:///{database}")
+    rows = [(i, 100 + k, (100 + k).to_bytes(8, "big")) for i, k in enumerate(STEPS)]
+    sqlite("erp", "Orders", "id INTEGER PRIMARY KEY, version INTEGER, rv BLOB", rows)
 
 
 SQL_CURSORS = [
@@ -250,7 +258,6 @@ SQL_CURSORS = [
 STREAM = {"backend_kwargs": {"return_type": "arrow_stream"}}  # connectorx reads in batches
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("cursor", SQL_CURSORS)
 def test_sql_chunks_order_by_the_cursor_and_never_limit_the_query(
     warehouse, query, frames, statements, backend, cursor
@@ -265,7 +272,7 @@ def test_sql_chunks_order_by_the_cursor_and_never_limit_the_query(
     source = SqlSource(name="erp", backend=backend, resources={chunked(cursor): config})
     assert IncrementalRun(define("erp", source))()["orders"] == len(STEPS)
     assert ids(query) == list(range(len(STEPS)))
-    assert len(increments(frames)) > 2
+    assert_chunked(increments(frames), len(STEPS), chunk=3, page=2)  # chunk_size rows a page
     if not isinstance(backend, ConnectorX):  # connectorx sends SQL past SQLAlchemy
         reads = [sql for sql in statements if 'FROM "Orders"' in sql]
         assert reads and all("ORDER BY" in sql and "LIMIT" not in sql for sql in reads)
@@ -329,7 +336,9 @@ def test_rest_chunks_resume_each_request_from_the_last_chunk(query, frames) -> N
     assert IncrementalRun(define("api", source))()["orders"] == len(STEPS)
     assert ids(query) == list(range(len(STEPS)))
     starts = [q["updated_since"][0] for q in adapter.queries if q["page"] == ["1"]]
-    assert len(increments(frames)) > 2 and starts == sorted(set(starts))
+    assert_chunked(increments(frames), len(STEPS), chunk=3, page=2)
+    assert len(starts) == len(increments(frames))  # each chunk is one paginated request
+    assert starts == sorted(set(starts))  # each resumes past the one before
 
 
 def test_filesystem_chunks_count_files_and_read_each_whole(tmp_path, query, frames) -> None:
@@ -347,12 +356,18 @@ def test_filesystem_chunks_count_files_and_read_each_whole(tmp_path, query, fram
 
     assert IncrementalRun(define("files", source))()["orders"] == 10
     assert ids(query) == list(range(10))
-    assert increments(frames)[:3] == [4, 4, 2]  # two files a chunk, each read whole
+    assert increments(frames) == [4, 4, 2]  # two files a chunk, each read whole
 
 
-def test_scrape_chunks_stop_the_crawl_and_resume_past_the_cursor(site: Site, query) -> None:
+def test_scrape_chunks_are_one_crawl_each_and_land_each_post_once(
+    site: Site, query, frames
+) -> None:
     listing(site, list(range(1, 8)))  # oldest first: ascending by id
     resource = chunked(value_cursor(Integer(), path="id", start=1), chunk=2)
     source = ScrapeSource(name="site", resources={resource: spider(site)})
     assert IncrementalRun(define("site", source))()["orders"] == 7
     assert ids(query) == list(range(1, 8))
+    assert increments(frames) == [2, 2, 2, 1]
+    # One crawl a chunk, each from page 1 (this spider takes no start); how far a closed crawl
+    # got first depends on how far Scrapling had fetched ahead, so it is not asserted.
+    assert site.paths().count("/page/1") == 4

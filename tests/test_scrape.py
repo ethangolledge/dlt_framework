@@ -1,12 +1,10 @@
 """ScrapeSource against a local site: crawls load raw, cursors stop crawls, failures are loud."""
 
 import pytest
-from conftest import Site
+from conftest import define, listing, spider
 
 from dlt_framework.core import (
-    FREEZE_DATA_TYPES,
     Append,
-    DuckDb,
     Integer,
     Pipeline,
     Resource,
@@ -15,46 +13,14 @@ from dlt_framework.core import (
 )
 from dlt_framework.core.errors import TerminalRunError
 from dlt_framework.core.run import BackfillRun, IncrementalRun
-from dlt_framework.sources.scrape import ScrapeSource, ScrapeSpider
-
-
-def listing(site: Site, posts: list[int], per_page: int = 3) -> None:
-    """Newest-first pages of posts, ``/page/1`` onwards, each linking to the next."""
-    pages = [posts[start : start + per_page] for start in range(0, len(posts), per_page)]
-    for number, page in enumerate(pages, start=1):
-        items = "".join(f'<li class="post" data-id="{post}">post {post}</li>' for post in page)
-        more = f'<a class="next" href="/page/{number + 1}">next</a>' if number < len(pages) else ""
-        site.pages[f"/page/{number}"] = (200, f"<ul>{items}</ul>{more}")
-
-
-def spider(site: Site, **stated):
-    class Posts(ScrapeSpider):
-        name = "posts"
-        start_urls = [f"{site.url}/page/1"]
-        robots_txt_obey = True
-        failed_requests = "raise"
-        max_blocked_retries = 1
-        locals().update(stated)
-
-        async def parse(self, response):
-            for post in response.css("li.post"):
-                yield {"id": int(post.attrib["data-id"]), "text": post.css("::text").get()}
-            if next_page := response.css("a.next::attr(href)").get():
-                yield response.follow(next_page)
-
-    return Posts
+from dlt_framework.sources.scrape import ScrapeSource
 
 
 def pipeline(posts_spider, cursor=None, backfill=None) -> Pipeline:
     resource = Resource(
         name="posts", write=Append(), cursor=cursor, empty="warn", backfill=backfill
     )
-    return Pipeline(
-        name="site",
-        target=DuckDb(dataset="raw_site"),
-        schema_contract=FREEZE_DATA_TYPES,
-        source=ScrapeSource(name="site", resources={resource: posts_spider}),
-    )
+    return define("site", ScrapeSource(name="site", resources={resource: posts_spider}), "raw_site")
 
 
 def test_a_crawl_follows_pages_and_loads_items_raw(site, query) -> None:

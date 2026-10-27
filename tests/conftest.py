@@ -1,10 +1,13 @@
+import importlib.util
+import sqlite3
 import sys
 import textwrap
 import threading
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, ClassVar
 
 import duckdb
 import polars as pl
@@ -21,6 +24,7 @@ from dlt_framework.core import (
     ValueCursor,
 )
 from dlt_framework.core.monitoring import ParquetSink
+from dlt_framework.core.source import Source
 from dlt_framework.core.windows import RowWindow
 from dlt_framework.sources.custom import CustomSource
 
@@ -97,6 +101,16 @@ ORDERS = Resource(
 )
 
 
+def define(name: str, source: Source[Any], dataset: str = "raw_shop") -> Pipeline:
+    """``source`` loading into DuckDB ``dataset`` with data types frozen."""
+    return Pipeline(
+        name=name,
+        target=DuckDb(dataset=dataset),
+        schema_contract=FREEZE_DATA_TYPES,
+        source=source,
+    )
+
+
 @pytest.fixture
 def make_pipeline() -> Callable[..., Pipeline]:
     def make(
@@ -105,14 +119,38 @@ def make_pipeline() -> Callable[..., Pipeline]:
         source: str = "shop",
         dataset: str = "raw_shop",
     ) -> Pipeline:
-        return Pipeline(
-            name=name,
-            target=DuckDb(dataset=dataset),
-            schema_contract=FREEZE_DATA_TYPES,
-            source=CustomSource(name=source, resources=resources),
-        )
+        return define(name, CustomSource(name=source, resources=resources), dataset)
 
     return make
+
+
+@pytest.fixture
+def sqlite(tmp_path, monkeypatch) -> Callable[[str, str, str, list[tuple[Any, ...]]], None]:
+    """Creates SQLite ``table`` (``columns`` as DDL) holding ``rows``, as SQL source ``source``'s
+    database: ``SOURCES__<SOURCE>__CREDENTIALS`` points at it."""
+
+    def create(source: str, table: str, columns: str, rows: list[tuple[Any, ...]]) -> None:
+        database = tmp_path / f"{source}.sqlite"
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute(f"CREATE TABLE {table} ({columns})")
+            values = ", ".join("?" * len(rows[0]))
+            connection.executemany(f"INSERT INTO {table} VALUES ({values})", rows)
+        monkeypatch.setenv(f"SOURCES__{source.upper()}__CREDENTIALS", f"sqlite:///{database}")
+
+    return create
+
+
+@pytest.fixture(params=["sqlalchemy", "pyarrow", "connectorx"])
+def backend(request) -> Any:
+    """Each SQL backend in turn, skipped when its extra is not installed."""
+    from dlt_framework.sources.sql import ConnectorX, PyArrow, SqlAlchemy  # the sql extra
+
+    chosen = {"sqlalchemy": SqlAlchemy, "pyarrow": PyArrow, "connectorx": ConnectorX}[
+        request.param
+    ]()
+    if missing := [m for m in chosen.requires() if importlib.util.find_spec(m) is None]:
+        pytest.skip(f"needs {missing}")
+    return chosen
 
 
 @pytest.fixture
@@ -191,3 +229,34 @@ def site() -> Iterator[Site]:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield served
     server.shutdown()
+
+
+def listing(site: Site, posts: list[int], per_page: int = 3) -> None:
+    """Pages of posts in the order given, ``/page/1`` onwards, each linking to the next."""
+    pages = [posts[start : start + per_page] for start in range(0, len(posts), per_page)]
+    for number, page in enumerate(pages, start=1):
+        items = "".join(f'<li class="post" data-id="{post}">post {post}</li>' for post in page)
+        more = f'<a class="next" href="/page/{number + 1}">next</a>' if number < len(pages) else ""
+        site.pages[f"/page/{number}"] = (200, f"<ul>{items}</ul>{more}")
+
+
+def spider(site: Site, **stated: Any) -> type:
+    """A spider crawling ``listing``'s pages from ``/page/1``; ``stated`` overrides its settings."""
+    # Imported here: scrape is an extra, and a failed import in conftest would stop every test.
+    from dlt_framework.sources.scrape import ScrapeSpider
+
+    class Posts(ScrapeSpider):
+        name = "posts"
+        start_urls: ClassVar[list[str]] = [f"{site.url}/page/1"]
+        robots_txt_obey = True
+        failed_requests = "raise"
+        max_blocked_retries = 1
+        locals().update(stated)
+
+        async def parse(self, response):
+            for post in response.css("li.post"):
+                yield {"id": int(post.attrib["data-id"]), "text": post.css("::text").get()}
+            if next_page := response.css("a.next::attr(href)").get():
+                yield response.follow(next_page)
+
+    return Posts

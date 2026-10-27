@@ -11,7 +11,7 @@ from dlt.extract.resource import DltResource
 
 from dlt_framework.core.errors import DefinitionError
 from dlt_framework.core.formats import CursorFormat, TimeFormat, ValueFormat
-from dlt_framework.core.windows import RowWindow, TimeWindow, ValueWindow, Window
+from dlt_framework.core.windows import TimeWindow, ValueWindow, Window
 
 FALLBACK_COLUMN = "_cursor"
 OnMissing = Literal["raise", "include", "exclude"]
@@ -47,9 +47,9 @@ class Cursor(ABC):
         return self.format.render(self.start)
 
     def bounds(self, window: Window) -> tuple[Any, Any] | None:
-        """Rendered ``(initial_value, end_value)`` for a window, or ``None`` for row windows,
-        which are positional and must not filter on this cursor."""
-        if isinstance(window, RowWindow):
+        """Rendered ``(initial_value, end_value)`` for a window, or ``None`` for a positional
+        window, which must not filter on this cursor."""
+        if window.positional:
             return None
         if not isinstance(window, self.window):
             raise DefinitionError(
