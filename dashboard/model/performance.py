@@ -1,4 +1,4 @@
-"""Where the time goes: steps busy or waiting, what holds each load up, slow tables, throughput,
+"""Where the time goes: steps busy or waiting, what holds each load up, slow tables,
 retries, and what changed between code versions."""
 
 import polars as pl
@@ -86,26 +86,6 @@ def slow_tables(view: View) -> pl.DataFrame:
             loads=pl.len(),
         )
         .sort("p95_s", descending=True, nulls_last=True)
-    )
-
-
-def throughput(view: View, points: int = 24) -> pl.DataFrame:
-    """Per resource: rows loaded, median rows a second of its own extract, and the trend of the
-    last ``points`` loads. Falling rows a second at the same volume means upstream slowed."""
-    loads = view.loads.filter(pl.col("window_kind") == "increment")
-    if loads.is_empty():
-        return pl.DataFrame(schema={"resource_id": pl.String, "rows": pl.Int64})
-    return (
-        loads.sort("at")
-        .group_by("resource_id")
-        .agg(
-            rows=pl.col("rows").sum(),
-            bytes=pl.col("bytes").sum(),
-            rows_per_s=pl.col("rows_per_s").median(),
-            trend=pl.col("rows_per_s").tail(points),
-            loads=pl.len(),
-        )
-        .sort("rows", descending=True)
     )
 
 

@@ -48,18 +48,46 @@ def test_pages_draw_the_frames_real_runs_write(make_pipeline, tmp_path) -> None:
     assert "SUCCEEDED" in text and "extract #1" in text and "orders" in text
 
 
-def test_the_run_page_explains_a_failure_and_says_what_to_do(week_frames) -> None:
+def test_the_run_page_leads_with_what_broke_and_what_to_run(week_frames) -> None:
     text = draw(week_frames, "run", 160)  # with none chosen: the latest failure
-    assert "ERROR" in text and "HTTPError" in text and "$ pipeline run scrape_filings" in text
+    lines = [line.rstrip() for line in text.splitlines()]
+    assert lines[3].startswith("✖ FAILED  scrape_filings  in extract · filings · HTTPError")
+    assert lines[4].endswith("then $ pipeline run scrape_filings")
+    assert any("TRACEBACK" in line for line in lines)
 
 
-def test_the_overview_shows_health_when_thresholds_apply() -> None:
+def test_the_overview_answers_first_then_says_who_and_what_next(week_frames) -> None:
+    lines = draw(week_frames, "overview", 160).splitlines()
+    assert lines[3].startswith("✖ 1 FAILING    ⚠ 2 AT RISK    █ 1 HEALTHY")
+    rows = [line for line in lines if "ago" in line]
+    assert [row.split()[2] for row in rows] == [
+        "scrape_filings",
+        "erp_sql",
+        "orders_api",
+        "files_landing",
+    ]
+    assert "1 scrape_filings" in draw(week_frames, "overview", 160)
+
+
+def test_the_overview_shows_health_when_thresholds_apply(week_frames) -> None:
     from dlt_framework.core.monitoring.health import Signal
 
-    view = View.build(demo.frames(NOW), Scope.last("7d", NOW), NOW)
-    signal = Signal("scrape_filings", None, "run_failed", "error", "HTTPError in filings")
+    view = View.build(week_frames, Scope.last("7d", NOW), NOW)
+    signal = Signal("files_landing", None, "run_stale", "error", "no success for 30h")
     text = plain(PAGES["overview"].draw(Context(view, 160, [signal])))
-    assert "✖ ERR  scrape_filings" in text and "run_failed" in text
+    assert "✖ 2 FAILING" in text and "late" in text
+
+
+def test_the_pipeline_page_tells_one_pipelines_story(week_frames) -> None:
+    view = View.build(week_frames, Scope.last("7d", NOW), NOW)
+    block = PAGES["pipeline"].draw(Context(view, 160, None, focus="erp_sql"))
+    text = plain(block)
+    assert text.splitlines()[3].startswith("⚠ AT RISK  memory at 92%")
+    assert "→ give it 4.8G" in text and "LATEST RUNS" in text
+    runs = {
+        style.split("|")[2] for line in block for _, style in line if style and "|run/" in style
+    }
+    assert runs <= {f"run/{run_id}" for run_id in view.runs["run_id"]} and runs
 
 
 @pytest.fixture(scope="module")

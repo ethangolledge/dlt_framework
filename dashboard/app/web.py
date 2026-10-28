@@ -6,8 +6,10 @@ encoded as HTML. Choices live in the URL, so a view can be shared or bookmarked.
 
 import argparse
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 import streamlit as st
 
@@ -53,11 +55,19 @@ def main() -> None:
 
 
 def _page(args: argparse.Namespace, choices: Choices) -> None:
-    page = PAGES[choices.page]
-    st.caption(f"{page.title.upper()} ─ {page.summary}")
-    st.markdown(
-        html(draw(_frames(args.uri, args.demo), choices), page.title), unsafe_allow_html=True
-    )
+    block = draw(_frames(args.uri, args.demo), choices)
+    st.markdown(html(block, PAGES[choices.page].title, _href(choices)), unsafe_allow_html=True)
+
+
+def _href(choices: Choices) -> Callable[[str], str]:
+    """Links one level down, as this app's own URL with the same range."""
+
+    def href(target: str) -> str:
+        kind, _, key = target.partition("/")
+        chosen = {"focus": key} if kind == "pipeline" else {"run": key}
+        return "?" + urlencode({"page": kind, "since": choices.since, **chosen})
+
+    return href
 
 
 @st.cache_data(ttl=REFRESH_S, show_spinner="reading monitoring frames…")
@@ -91,11 +101,13 @@ def _controls(frames: Frames) -> Choices:
         outcomes = st.multiselect(
             "outcomes", OUTCOMES, default=[o for o in query.get_all("outcome") if o in OUTCOMES]
         )
-        run_id = None
-        if PAGES[page].picks_run:
+        run_id = focus = None
+        if PAGES[page].picks == "run":
             run_id = _run_picker(
                 frames, Scope.last(since, now, pipelines=tuple(pipelines)), now, query.get("run")
             )
+        if PAGES[page].picks == "pipeline" and known:
+            focus = str(st.selectbox("pipeline", known, index=_index(known, query.get("focus"))))
         size = st.slider("columns", 100, 240, int(query.get("columns", 160)), step=10)
         st.toggle("live (every minute)", value=True, key="live")
         st.toggle("scanlines", value=True, key="scanlines")
@@ -110,9 +122,12 @@ def _controls(frames: Frames) -> Choices:
             "outcome": outcomes,
             "columns": str(size),
             **({"run": run_id} if run_id else {}),
+            **({"focus": focus} if focus else {}),
         }
     )
-    return Choices(page, since, tuple(pipelines), tuple(modes), tuple(outcomes), run_id, size)
+    return Choices(
+        page, since, tuple(pipelines), tuple(modes), tuple(outcomes), run_id, focus, size
+    )
 
 
 def _run_picker(frames: Frames, scope: Scope, now: datetime, chosen: str | None) -> str | None:

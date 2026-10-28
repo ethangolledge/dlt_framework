@@ -14,6 +14,25 @@
 - The Streamlit frontend (`dashboard/app/web.py`) is written but untested until the `dashboard`
   extra is installed; its smoke test skips until then.
 
+**Revised (2026-10-28): one story, top down.** The first build showed everything at once:
+too much text, descriptions where titles belong, and no clear place to start. The pages were
+reworked around how a dashboard is read:
+
+- **Answer first.** Each page answers one question and its first line is the answer. The
+  overview opens with a verdict (`✖ 1 FAILING ⚠ 2 AT RISK █ 1 HEALTHY`), not a row of KPIs.
+- **Drill down, don't spread out.** Overview → pipeline → run, each level linked to the next.
+  One pipeline's story used to be split over five topic pages; the pipeline page now tells it
+  whole. The topic pages stay, for comparing across pipelines, and each opens with its findings.
+- **Exceptions first, quiet when well.** Pipelines are ranked worst first; colour means a state,
+  never decoration; a passed check is one line; a ranked panel shows ten rows and "+N more".
+- **Titles, not descriptions.** Panels are named in a word or two; detail moves into tooltips.
+- **One list of what to do** (`model/triage.py`), from the runs (failing streaks), health (late,
+  slow), and the advisor, ranked by urgency: what breaks runs, what wastes them, what loses data,
+  what slows them. The overview, a pipeline's to-do list, and Actions show it in the same words.
+- **Cut:** the Runs page (the overview's run matrix and the pipeline page's runs replace it; what
+  ran at once moved to Capacity), the ticker, throughput sparklines, and every panel subtitle.
+- **Added:** the advisor flags a release that made runs slower than the one before.
+
 A terminal-styled, 90s-hacker dashboard over the monitoring frames: black, electric colours,
 ASCII art. It answers three questions, in the order an engineer asks them:
 

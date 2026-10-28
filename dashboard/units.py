@@ -8,7 +8,7 @@ def change(now: float, before: float) -> str:
     if not before:
         return "new" if now else "-"
     delta = (now - before) / before
-    return f"{'▲' if delta > 0 else '▼' if delta < 0 else '='}{abs(delta):.0%} vs prev"
+    return f"{'▲' if delta > 0 else '▼' if delta < 0 else '='}{abs(delta):.0%}"
 
 
 def human(count: float) -> str:

@@ -17,17 +17,30 @@ def test_the_terminal_shows_every_page(key, capsys) -> None:
     assert "DLT//OPS" in out and "\x1b[" not in out
 
 
+def test_the_terminal_shows_the_pipeline_or_run_it_is_given(capsys) -> None:
+    terminal.main(["show", "pipeline", "orders_api", "--demo", "--width", "120", "--no-colour"])
+    assert "orders_api ·" in capsys.readouterr().out
+
+
 def test_colour_is_on_when_asked(capsys) -> None:
     terminal.main(["show", "--demo", "--width", "100", "--colour"])
     assert "\x1b[38;2;" in capsys.readouterr().out
 
 
-def test_export_writes_a_linked_page_for_each_page(tmp_path, capsys) -> None:
+def test_export_writes_every_page_and_each_page_a_link_leads_to(tmp_path, capsys) -> None:
     assert terminal.main(["export", str(tmp_path / "site"), "--demo"]) == 0
-    written = sorted(path.name for path in (tmp_path / "site").iterdir())
-    assert written == sorted(["index.html", *(f"{key}.html" for key in PAGES if key != "overview")])
-    page = (tmp_path / "site" / "runs.html").read_text()
-    assert '<a class="on" href="runs.html">' in page and '<pre class="term"' in page
+    site = tmp_path / "site"
+    written = {path.name for path in site.iterdir()}
+    assert {"index.html", *(f"{key}.html" for key in PAGES if key != "overview")} <= written
+    assert "pipeline-erp_sql.html" in written
+    page = (site / "speed.html").read_text()
+    assert '<a class="on" href="speed.html">' in page and '<pre class="term"' in page
+    overview = (site / "index.html").read_text()
+    assert 'href="pipeline-scrape_filings.html"' in overview
+    linked = {
+        part.split('"', 1)[0] for part in overview.split('href="')[1:] if part.startswith("run-")
+    }
+    assert linked and linked <= written  # every run link leads to a page
 
 
 def test_the_demo_folder_reads_back_through_a_sink(tmp_path, capsys) -> None:
@@ -43,7 +56,7 @@ def test_the_terminal_reads_the_environment_monitoring_uri(make_pipeline, capsys
     from dlt_framework.core.run import IncrementalRun
 
     IncrementalRun(make_pipeline({ORDERS: Upstream([{"id": 1, "updated_at": 100}])}))()
-    assert terminal.main(["show", "runs", "--width", "120", "--no-colour", "--since", "1h"]) == 0
+    assert terminal.main(["show", "--width", "120", "--no-colour", "--since", "1h"]) == 0
     assert "shop" in capsys.readouterr().out
 
 

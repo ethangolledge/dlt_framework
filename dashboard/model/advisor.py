@@ -1,7 +1,9 @@
 """The advisor: rules that turn the facts into changes worth making, each with its evidence.
 
 Health says what is broken now; the advisor says what would make pipelines faster, cheaper, or
-complete. Every rule names the measure it read, so a reader can check it before acting.
+complete. A finding is a headline a reader takes in at a glance (``memory at 92%``); its
+evidence names the measure it read, so it can be checked before acting; its action is the one
+change to make, with any alternatives kept aside in ``also``.
 """
 
 from dataclasses import dataclass
@@ -11,172 +13,250 @@ import polars as pl
 
 from dashboard.model import capacity, completeness, failures, performance
 from dashboard.model.facts import WAITING, View
-from dashboard.units import edge, mb
+from dashboard.units import edge, mb, seconds
 
 WAITS = 0.3  # a step taking at least this share of run time, while waiting, is worth tuning
 HOLDS = 0.7  # a resource last to finish in this share of shared loads holds the unit up
 TIGHT, LOOSE = 0.7, 0.3  # p99 memory above / below this share of what was available
 RECURS = 3  # failures in one place before it is a pattern
-_MOVED = {"hole": "skipped ahead", "reset": "went back"}
+SLOWER = 0.2  # a release whose median run is this much slower than the one before
+# Most urgent first: what breaks runs, what wastes them, what loses data, what slows them.
+AREAS = ("reliability", "memory", "completeness", "performance", "concurrency", "destination")
+_MOVED = {"hole": "cursor skipped ahead", "reset": "cursor went back"}
 
 
 @dataclass(frozen=True, slots=True)
 class Advice:
-    level: str  # "warning": costing time, money, or data; "info": worth knowing
-    area: str  # concurrency, memory, destination, completeness, reliability
-    pipeline: str
-    finding: str
+    level: str  # "error": broken now; "warning": costing time, money, or data; "info": tuning
+    area: str  # one of AREAS
+    pipeline: str  # one pipeline, or several joined by ", "
+    finding: str  # the headline
     evidence: str
     action: str
+    also: str = ""  # alternatives to the action
+    run_id: str | None = None  # the run that shows it, where one does
+
+    def concerns(self, pipeline: str) -> bool:
+        return pipeline in self.pipeline.split(", ")
 
 
 def advise(view: View) -> list[Advice]:
-    advice: list[Advice] = []
-    workers = _workers(view)
+    advice = [
+        *_steps(view),
+        *_critical_path(view),
+        *_memory(view),
+        *_releases(view),
+        *_completeness(view),
+        *_recurring(view),
+    ]
+    return sorted(
+        advice, key=lambda item: (item.level != "warning", AREAS.index(item.area), item.pipeline)
+    )
+
+
+def _steps(view: View) -> list[Advice]:
+    found, workers = [], _workers(view)
     for row in performance.step_profile(view).iter_rows(named=True):
         if row["share"] is None or row["share"] < WAITS or row["cpu_share"] is None:
             continue
         pipeline, step = row["pipeline_id"], row["step"]
-        evidence = f"{row['share']:.0%} of run time, {row['cpu_share']:.0%} of it computing"
+        setup = workers.get(pipeline, {})
+        evidence = f"{row['share']:.0%} of run time, {row['cpu_share']:.0%} computing"
         if step == "extract" and row["cpu_share"] <= WAITING:
-            setup = workers.get(pipeline, {})
-            now, source = setup.get("extract_workers"), setup.get("source") or "<source>"
-            advice.append(
+            source = setup.get("source") or "<source>"
+            found.append(
                 Advice(
                     "warning",
                     "concurrency",
                     pipeline,
-                    "extract mostly waits on upstream",
+                    "extract waits on upstream",
                     evidence,
-                    f"raise [sources.{source}.extract] workers (now {now or '?'}) if upstream "
-                    "allows parallel reads, split resources into pipelines of their own, or check "
-                    "the source for a slow query or a missing index on the cursor column",
+                    f"raise [sources.{source}.extract] workers "
+                    f"(now {setup.get('extract_workers') or '?'})",
+                    "if upstream allows parallel reads; or split resources into pipelines of "
+                    "their own; or look for a slow query or a missing index on the cursor column",
                 )
             )
         elif step == "load" and row["cpu_share"] <= WAITING:
-            advice.append(
+            found.append(
                 Advice(
                     "warning",
                     "destination",
                     pipeline,
-                    "load mostly waits on the destination",
+                    "load waits on the destination",
                     evidence,
-                    "see Slow tables: index the merge key of the slowest, or merge it as "
-                    "delete-insert; on Postgres raise [load] workers",
+                    "index the slowest table's merge key (see Speed)",
+                    "or merge it as delete-insert; on Postgres raise [load] workers",
                 )
             )
         elif step == "normalize" and row["cpu_share"] >= 0.8 * (
-            workers.get(pipeline, {}).get("normalize_workers") or 1
+            setup.get("normalize_workers") or 1
         ):
-            advice.append(
+            found.append(
                 Advice(
                     "info",
                     "concurrency",
                     pipeline,
                     "normalize is CPU-bound",
                     evidence,
-                    "raise [normalize] workers if Capacity shows idle cores",
+                    f"raise [normalize] workers (now {setup.get('normalize_workers') or 1})",
+                    "if Capacity shows idle cores",
                 )
             )
-    for row in performance.critical_path(view).iter_rows(named=True):
-        if row["loads"] >= 3 and row["last"] / row["loads"] >= HOLDS and (row["share"] or 0) >= 0.6:
-            advice.append(
-                Advice(
-                    "info",
-                    "concurrency",
-                    row["pipeline_id"],
-                    f"{row['resource']} holds up the resources extracted with it",
-                    f"last to finish in {row['last']} of {row['loads']} loads",
-                    "give it a pipeline of its own, or chunk it, so the others commit sooner",
-                )
-            )
+    return found
+
+
+def _critical_path(view: View) -> list[Advice]:
+    return [
+        Advice(
+            "info",
+            "concurrency",
+            row["pipeline_id"],
+            f"{row['resource']} finishes last",
+            f"last in {row['last']} of {row['loads']} loads",
+            f"give {row['resource']} a pipeline of its own",
+            "or chunk it, so the resources extracted with it commit sooner",
+        )
+        for row in performance.critical_path(view).iter_rows(named=True)
+        if row["loads"] >= 3 and row["last"] / row["loads"] >= HOLDS and (row["share"] or 0) >= 0.6
+    ]
+
+
+def _memory(view: View) -> list[Advice]:
+    found = []
     for row in capacity.memory(view).iter_rows(named=True):
         share, pipeline = row["share"], row["pipeline_id"]
         if share is None:
             continue
-        peak, available = mb(row["p99_mb"]), mb(row["available_mb"])
-        evidence = f"p99 peak {peak} of {available} ({share:.0%}), {row['runs']} runs"
+        evidence = f"p99 peak {mb(row['p99_mb'])} of {mb(row['available_mb'])}, {row['runs']} runs"
         if share >= TIGHT:
-            advice.append(
+            found.append(
                 Advice(
                     "warning",
                     "memory",
                     pipeline,
-                    "runs close to their memory",
+                    f"memory at {share:.0%}",
                     evidence,
-                    f"give it {mb(row['recommended_mb'])}, or chunk its largest resource",
+                    f"give it {mb(row['recommended_mb'])}",
+                    "or chunk its largest resource",
                 )
             )
         elif share <= LOOSE and row["limit_mb"] is not None:
-            advice.append(
+            found.append(
                 Advice(
                     "info",
                     "memory",
                     pipeline,
-                    "memory mostly idle",
+                    f"memory {share:.0%} used",
                     evidence,
-                    f"its limit could come down to {mb(row['recommended_mb'])}",
+                    f"lower its limit to {mb(row['recommended_mb'])}",
                 )
             )
+    return found
+
+
+def _releases(view: View) -> list[Advice]:
+    """A release that made runs slower than the release before it."""
+    found = []
+    for key, own in performance.by_version(view).group_by("pipeline_id", maintain_order=True):
+        rows = own.filter(pl.col("runs") >= 3).tail(2).to_dicts()
+        if len(rows) < 2 or not rows[0]["p50_s"]:
+            continue
+        before, after = rows
+        slower = after["p50_s"] / before["p50_s"] - 1
+        if slower >= SLOWER:
+            found.append(
+                Advice(
+                    "warning",
+                    "performance",
+                    str(key[0]),
+                    f"{after['code_version']} is {slower:.0%} slower",
+                    f"median run {seconds(before['p50_s'])} on {before['code_version']}, "
+                    f"{seconds(after['p50_s'])} since",
+                    f"compare {after['code_version']} with {before['code_version']}",
+                )
+            )
+    return found
+
+
+def _completeness(view: View) -> list[Advice]:
+    found = []
     for covered in completeness.coverage(view):
         if covered.commands and covered.gaps[0][1] is not None:
-            pipeline = covered.resource_id.split(".", 1)[0]
-            advice.append(
+            pipeline, resource = covered.resource_id.split(".", 1)
+            portion = "-" if covered.fraction is None else f"{covered.fraction:.0%}"
+            found.append(
                 Advice(
                     "warning",
                     "completeness",
                     pipeline,
-                    f"{covered.resource_id} history has {len(covered.gaps)} gap(s)",
-                    f"{'-' if covered.fraction is None else f'{covered.fraction:.0%}'} covered",
-                    covered.commands[0],
+                    f"{resource}: {len(covered.gaps)} history gap(s)",
+                    f"{portion} of declared history loaded",
+                    f"$ {covered.commands[0]}",
                 )
             )
-    for found in completeness.cursor_breaks(view):
-        if found.kind == "reread":
+    for broken in completeness.cursor_breaks(view):
+        if broken.kind == "reread":
             continue  # expected with lag; shown on Completeness
-        advice.append(
+        pipeline, resource = broken.resource_id.split(".", 1)
+        found.append(
             Advice(
                 "warning",
                 "completeness",
-                found.resource_id.split(".", 1)[0],
-                f"{found.resource_id} cursor {_MOVED[found.kind]}",
-                f"{edge(found.previous_last)} → {edge(found.next_start)} "
-                f"at {found.at:%Y-%m-%d %H:%M}Z",
+                pipeline,
+                f"{resource}: {_MOVED[broken.kind]}",
+                f"{edge(broken.previous_last)} → {edge(broken.next_start)} "
+                f"at {broken.at:%Y-%m-%d %H:%M}Z",
                 "backfill the skipped range"
-                if found.kind == "hole"
+                if broken.kind == "hole"
                 else "check for a state reset; under Append, de-duplicate",
             )
         )
     for row in completeness.reconciled(view).iter_rows(named=True):
-        if (row["duplicates"] or 0) > 0 or row["differing"]:
-            advice.append(
-                Advice(
-                    "warning",
-                    "completeness",
-                    row["resource_id"].split(".", 1)[0],
-                    f"{row['resource_id']} does not match",
-                    f"{row['duplicates'] or 0} duplicate keys, "
-                    f"{row['differing']} window(s) differ from the source",
-                    "see Completeness; backfill the differing windows, check the merge key",
-                )
+        duplicates, differing = row["duplicates"] or 0, row["differing"]
+        if not duplicates and not differing:
+            continue
+        pipeline, resource = row["resource_id"].split(".", 1)
+        what = [f"{duplicates} duplicate keys"] if duplicates else []
+        what += [f"{differing} window(s) off the source"] if differing else []
+        todo = ["check the merge key"] if duplicates else []
+        todo += ["backfill the differing windows"] if differing else []
+        source = "-" if row["source_rows"] is None else f"{row['source_rows']:,}"
+        found.append(
+            Advice(
+                "warning",
+                "completeness",
+                pipeline,
+                f"{resource}: {', '.join(what)}",
+                f"{row['rows']:,} rows here, {source} at the source",
+                "; ".join(todo),
             )
+        )
+    return found
+
+
+def _recurring(view: View) -> list[Advice]:
+    found = []
     for row in failures.by_cause(view).iter_rows(named=True):
         if row["count"] < RECURS:
             continue
         killed = row["cause"] == "killed"
-        advice.append(
+        found.append(
             Advice(
                 "warning",
                 "memory" if killed else "reliability",
                 row["pipelines"],
                 "runs keep being killed" if killed else f"{row['cause']} recurs",
-                f"{row['count']} {'lost runs' if killed else 'failures at ' + row['where']}",
-                "see Capacity: give them more memory, or chunk the largest resource"
+                f"{row['count']} lost runs"
+                if killed
+                else f"{row['count']} times at {row['where']}",
+                "give them more memory (see Capacity)"
                 if killed
                 else "fix it where it is raised; retrying will not",
+                "or chunk the largest resource" if killed else "",
             )
         )
-    return sorted(advice, key=lambda item: (item.level != "warning", item.area, item.pipeline))
+    return found
 
 
 def _workers(view: View) -> dict[str, dict[str, Any]]:

@@ -10,7 +10,7 @@ throughput. Dirty data is dealt with once, here:
 - everything is ordered by time, never by the order files were read.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -21,6 +21,7 @@ from dlt_framework.core.monitoring import Frames
 ENDED = ("succeeded", "failed", "lost")
 BUSY, WAITING = 0.6, 0.2  # CPU share of a step above which it computed, below which it waited
 OPEN_GRACE = timedelta(hours=1)  # how long a run with no history may run before it is lost
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)  # where "all" starts, until the runs say otherwise
 _RANK = {"lost": 0, "failed": 1, "retried": 2, "running": 3, "succeeded": 4}
 
 
@@ -256,7 +257,7 @@ class Scope:
     def last(cls, text: str, now: datetime, **kept: tuple[str, ...]) -> "Scope":
         """``"24h"``, ``"7d"``, ``"90m"``, or ``"all"`` before ``now``."""
         if text == "all":
-            return cls(datetime(1970, 1, 1, tzinfo=UTC), now, **kept)
+            return cls(EPOCH, now, **kept)
         amount, unit = int(text[:-1]), text[-1]
         units = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
         return cls(now - timedelta(**{units[unit]: amount}), now, **kept)
@@ -305,6 +306,10 @@ class View:
     @classmethod
     def build(cls, frames: Frames, scope: Scope, now: datetime) -> "View":
         history = runs(frames, now)
+        if scope.start == EPOCH and history.height:  # "all": axes start at the first run
+            scope = replace(
+                scope, start=min(history.select(pl.col("started_at").min()).item(), now)
+            )
         kept = scope.keep(history)
         ids = kept["run_id"].implode()
 
@@ -329,6 +334,25 @@ class View:
         return sorted(
             set(self.history["pipeline_id"].drop_nulls())
             | set(self.frames.pipelines["pipeline_id"])
+        )
+
+    def only(self, pipeline: str) -> "View":
+        """This view narrowed to one pipeline. ``frames`` stay whole, for facts that read them."""
+        runs = self.runs.filter(pl.col("pipeline_id") == pipeline)
+        ids = runs["run_id"].implode()
+
+        def mine(frame: pl.DataFrame) -> pl.DataFrame:
+            return frame.filter(pl.col("run_id").is_in(ids))
+
+        return replace(
+            self,
+            scope=replace(self.scope, pipelines=(pipeline,)),
+            history=self.history.filter(pl.col("pipeline_id") == pipeline),
+            runs=runs,
+            steps=mine(self.steps),
+            loads=mine(self.loads),
+            tables=mine(self.tables),
+            samples=mine(self.samples),
         )
 
     def run(self, run_id: str) -> dict[str, Any] | None:

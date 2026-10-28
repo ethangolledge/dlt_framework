@@ -6,10 +6,15 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+
+import polars as pl
 
 from dashboard import demo
 from dashboard.app.session import RANGES, Choices, draw, load
+from dashboard.model.facts import Scope, View
 from dashboard.pages import PAGES
 from dashboard.render.encode import FONTS, ansi, html, stylesheet
 from dashboard.theme import COLOURS
@@ -24,13 +29,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _show(args: argparse.Namespace) -> None:
     frames = load(args.uri, args.demo)
+    picks = PAGES[args.page].picks
     choices = Choices(
         page=args.page,
         since=args.since,
         pipelines=tuple(args.pipeline or ()),
         modes=tuple(args.mode or ()),
         outcomes=tuple(args.outcome or ()),
-        run_id=args.run,
+        run_id=args.run or (args.subject if picks == "run" else None),
+        focus=args.subject if picks == "pipeline" else None,
         size=args.width or shutil.get_terminal_size((140, 40)).columns,
     )
     print(
@@ -60,20 +67,34 @@ def _serve(args: argparse.Namespace) -> int:
 
 
 def _export(args: argparse.Namespace) -> None:
-    """Every page as static HTML, linked to each other: for hosting anywhere files are served."""
+    """Every page as static HTML, for hosting anywhere files are served; and a page for each
+    pipeline and for each run the pages list (failed, lost, and each pipeline's latest), so
+    every link leads somewhere."""
     folder = Path(args.folder)
     folder.mkdir(parents=True, exist_ok=True)
-    frames = load(args.uri, args.demo)
-    for key, page in PAGES.items():
-        choices = Choices(page=key, since=args.since, size=args.width)
-        body = html(draw(frames, choices), page.title)
-        (folder / _file(key)).write_text(
-            _site(page.title, page.summary, key, body), encoding="utf-8"
-        )
-    print(f"{len(PAGES)} pages written to {folder}/index.html")
+    frames, now = load(args.uri, args.demo), datetime.now(UTC)
+    view = View.build(frames, Scope.last(args.since, now), now)
+    broken = view.runs.filter(pl.col("outcome").is_in(["failed", "lost"]))["run_id"]
+    latest = view.runs.sort("started_at", descending=True).group_by("pipeline_id").head(10)
+    runs = {*broken, *latest["run_id"]}
+
+    def href(target: str) -> str | None:
+        kind, _, key = target.partition("/")
+        if kind == "pipeline":
+            return f"pipeline-{key}.html"
+        return f"run-{key}.html" if kind == "run" and key in runs else None
+
+    pages = [(_file(key), Choices(page=key)) for key in PAGES]
+    pages += [(f"pipeline-{name}.html", Choices("pipeline", focus=name)) for name in view.pipelines]
+    pages += [(f"run-{run_id}.html", Choices("run", run_id=run_id)) for run_id in sorted(runs)]
+    for name, choices in pages:
+        chosen = replace(choices, since=args.since, size=args.width)
+        body = html(draw(frames, chosen, now), PAGES[chosen.page].title, href)
+        (folder / name).write_text(_site(PAGES[chosen.page].title, chosen.page, body), "utf-8")
+    print(f"{len(pages)} pages written to {folder}/index.html")
 
 
-def _site(title: str, summary: str, current: str, body: str) -> str:
+def _site(title: str, current: str, body: str) -> str:
     links = " ".join(
         f'<a class="{"on" if key == current else ""}" href="{_file(key)}">{page.title}</a>'
         for key, page in PAGES.items()
@@ -86,13 +107,12 @@ def _site(title: str, summary: str, current: str, body: str) -> str:
 <style>
 body {{ background: {COLOURS["background"]}; color: {COLOURS["text"]}; margin: 0;
        padding: 12px 16px; font-family: 'JetBrains Mono', ui-monospace, monospace; }}
-nav {{ margin: 0 0 6px 0; font-size: 13px; }}
+nav {{ margin: 0 0 8px 0; font-size: 13px; }}
 nav a {{ color: {COLOURS["muted"]}; text-decoration: none; margin-right: 14px; }}
 nav a.on, nav a:hover {{ color: {COLOURS["ok"]}; text-shadow: 0 0 8px {COLOURS["ok"]}; }}
-p.summary {{ color: {COLOURS["muted"]}; font-size: 12px; margin: 0 0 8px 0; }}
 {stylesheet()}
 </style></head>
-<body><nav>{links}</nav><p class="summary">{title.upper()} ─ {summary}</p>{body}</body></html>
+<body><nav>{links}</nav>{body}</body></html>
 """
 
 
@@ -121,6 +141,9 @@ def _parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="draw a page in the terminal")
     show.set_defaults(command=_show)
     show.add_argument("page", choices=list(PAGES), nargs="?", default="overview")
+    show.add_argument(
+        "subject", nargs="?", help="the pipeline (pipeline page) or run (run, profile) to show"
+    )
     show.add_argument("--since", choices=RANGES, default="24h")
     show.add_argument("--pipeline", action="append", help="only this pipeline; repeat for several")
     show.add_argument("--mode", action="append", choices=["run", "backfill"])

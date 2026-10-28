@@ -7,9 +7,18 @@ import polars as pl
 import pytest
 
 from dashboard import demo
-from dashboard.model import advisor, capacity, completeness, failures, overview, performance
+from dashboard.model import (
+    advisor,
+    capacity,
+    completeness,
+    failures,
+    overview,
+    performance,
+    triage,
+)
 from dashboard.model.facts import Scope, View, runs
 from dlt_framework.core.monitoring import Frames, LoadRecord, RunRecord, SampleRecord, StepRecord
+from dlt_framework.core.monitoring.health import Signal
 
 NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
 IDENTITY = {
@@ -169,7 +178,7 @@ def test_kpis_compare_with_the_period_before() -> None:
             View.build(frames_of(*now_runs, *before), Scope.last("24h", NOW), NOW)
         )
     }
-    assert (kpis["RUNS"].value, kpis["RUNS"].note) == ("4", "▲300% vs prev")
+    assert (kpis["RUNS"].value, kpis["RUNS"].note) == ("4", "▲300%")
     assert (kpis["SUCCESS"].value, kpis["ROWS"].value) == ("100.0%", "40")
 
 
@@ -246,18 +255,73 @@ def test_capacity_sizes_from_the_p99_peak_and_rounds_up() -> None:
 def test_the_advisor_turns_each_planted_problem_into_an_action(week) -> None:
     found = {(item.area, item.pipeline, item.finding) for item in advisor.advise(week)}
     expect = [
-        ("concurrency", "orders_api", "extract mostly waits on upstream"),
-        ("memory", "erp_sql", "runs close to their memory"),
-        ("memory", "files_landing", "memory mostly idle"),
-        ("completeness", "orders_api", "orders_api.orders history has 2 gap(s)"),
-        ("completeness", "orders_api", "orders_api.orders cursor skipped ahead"),
-        ("completeness", "erp_sql", "erp_sql.ledger_lines does not match"),
+        ("concurrency", "orders_api", "extract waits on upstream"),
+        ("memory", "erp_sql", "memory at 92%"),
+        ("memory", "files_landing", "memory 27% used"),
+        ("completeness", "orders_api", "orders: 2 history gap(s)"),
+        ("completeness", "orders_api", "orders: cursor skipped ahead"),
+        ("completeness", "erp_sql", "ledger_lines: 12 duplicate keys, 1 window(s) off the source"),
         ("reliability", "scrape_filings", "HTTPError recurs"),
     ]
     assert [item for item in expect if item not in found] == []
+    slower = [finding for area, _, finding in found if area == "performance"]
+    assert len(slower) == 1 and slower[0].startswith("1.5.0 is 9")  # 1.6x the work, and noise
     actions = {(item.pipeline, item.finding): item.action for item in advisor.advise(week)}
-    waits = actions["orders_api", "extract mostly waits on upstream"]
-    assert "[sources.orders_api.extract] workers (now 5)" in waits
+    waits = actions["orders_api", "extract waits on upstream"]
+    assert waits == "raise [sources.orders_api.extract] workers (now 5)"
+
+
+def test_triage_puts_failing_pipelines_first_with_the_fix_and_the_command(week) -> None:
+    found = triage.actions(week, None)
+    first = found[0]
+    assert (first.level, first.pipeline, first.finding) == (
+        "error",
+        "scrape_filings",
+        "failed 3 runs in a row: HTTPError",
+    )
+    assert first.action.endswith("then $ pipeline run scrape_filings") and first.run_id
+    # the recurring HTTPError is the same story as the failure, so it is told once
+    assert not [item for item in found if item.finding == "HTTPError recurs"]
+    levels = [triage.RANK[item.level] for item in found]
+    assert levels == sorted(levels)
+
+
+def test_statuses_rank_pipelines_by_their_worst_finding(week) -> None:
+    states = triage.statuses(week, triage.actions(week, None))
+    assert [(status.pipeline, status.level) for status in states] == [
+        ("scrape_filings", "error"),
+        ("erp_sql", "warning"),
+        ("orders_api", "warning"),
+        ("files_landing", "ok"),
+    ]
+    assert states[1].headline == "memory at 92%  +2"  # memory first: it is what kills runs
+    assert states[-1].headline == "ok"
+
+
+def test_health_adds_what_only_its_thresholds_can_judge(week) -> None:
+    late = Signal("files_landing", None, "run_stale", "error", "no success for 30h")
+    again = Signal("scrape_filings", None, "run_failed", "error", "HTTPError")
+    found = triage.actions(week, [late, again])
+    states = {status.pipeline: status for status in triage.statuses(week, found)}
+    assert (states["files_landing"].level, states["files_landing"].headline) == ("error", "late")
+    assert sum(item.pipeline == "scrape_filings" and item.level == "error" for item in found) == 1
+
+
+def test_a_lost_run_is_a_failure_to_give_more_memory() -> None:
+    frames = frames_of(
+        *started_and("ok", NOW - timedelta(hours=30), "succeeded"),
+        run("gone", "started", NOW - timedelta(hours=26)),
+    )
+    view = View.build(frames, Scope.last("7d", NOW), NOW)
+    (found,) = triage.failing(view)
+    assert found.finding == "last run killed" and found.action.startswith("give it more memory")
+
+
+def test_a_view_narrowed_to_one_pipeline_keeps_only_its_runs(week) -> None:
+    mine = week.only("erp_sql")
+    assert set(mine.runs["pipeline_id"]) == {"erp_sql"} == set(mine.history["pipeline_id"])
+    assert mine.steps["run_id"].is_in(mine.runs["run_id"].implode()).all()
+    assert mine.scope.pipelines == ("erp_sql",)
 
 
 def test_cursor_breaks_tell_holes_rereads_and_resets_apart() -> None:

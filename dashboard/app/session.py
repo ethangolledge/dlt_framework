@@ -25,6 +25,7 @@ class Choices:
     modes: tuple[str, ...] = ()
     outcomes: tuple[str, ...] = ()
     run_id: str | None = None
+    focus: str | None = None  # the pipeline a pipeline page shows
     size: int = 140
 
 
@@ -46,4 +47,6 @@ def draw(frames: Frames, choices: Choices, now: datetime | None = None) -> Block
     )
     view = View.build(frames, scope, now)
     signals = source.signals(frames, list(choices.pipelines) or view.pipelines)
-    return PAGES[choices.page].draw(Context(view, choices.size, signals, choices.run_id))
+    return PAGES[choices.page].draw(
+        Context(view, choices.size, signals, choices.run_id, choices.focus)
+    )

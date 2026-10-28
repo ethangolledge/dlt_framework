@@ -411,7 +411,7 @@ as a colour. It reads the frames and nothing else (no pipeline code, destination
 so it works for any pipeline and source type, wherever the frames can be read.
 
 ```bash
-pipeline-dashboard show [PAGE] [--since 24h] [--pipeline P] [--run RUN]   # in the terminal
+pipeline-dashboard show [PAGE] [NAME|RUN] [--since 24h] [--pipeline P]   # in the terminal
 pipeline-dashboard serve [--port 8501]                                   # web app (the dashboard extra)
 pipeline-dashboard export FOLDER [--since 7d]                            # static HTML, any web host
 pipeline-dashboard demo FOLDER                                           # a week of demo frames
@@ -419,17 +419,22 @@ pipeline-dashboard demo FOLDER                                           # a wee
 
 Each command reads `MONITORING__URI` (as runs do), or `--uri`, or `--demo` for generated frames.
 
-| Page | Answers | When |
-| --- | --- | --- |
-| Mission control | KPIs against the period before, the run matrix, health now, each pipeline's trend | every morning |
-| Runs | A timeline of every run, what ran at once and its summed memory, the latest runs | "what happened overnight?" |
-| Run | One run: steps busy or waiting, memory by step against its limit, resources, tables, cursors, the error with its chain, input, and traceback, and the command to run next | on an alert |
-| Performance | Step time and CPU share per pipeline, duration by release, slow tables, which resource holds a load up, throughput, retries | after a release; weekly |
-| Capacity | Peak memory p50 to p99 against the limit, a recommended size, memory by step, CPU in use, daily headroom | before scaling; on OOM kills |
-| Completeness | Backfill coverage with the command for each gap, cursor holes, re-reads, and resets, reconciliation, windows loaded twice or empty | before trusting the data |
-| Failures | Failures by root cause and the line raised at, time to recover, every failed and lost run | patterns, not one-offs |
-| Profile | The functions a `--profile` run spent its time in, per step | a slow job you cannot explain |
-| Advisor | What to change, with its evidence: workers, splitting or chunking a resource, container memory, merge keys, backfills, recurring errors | weekly tuning |
+It tells one story, top down. Each page answers one question and its first line is the answer;
+what is wrong comes first and in colour, what is fine stays quiet; panels carry titles, not
+descriptions; and every pipeline and run named links one level down (in HTML and on the web).
+
+| Page | Answers |
+| --- | --- |
+| Overview | Does anything need me? The verdict, four numbers against the period before, every pipeline worst first with its reason and runs, and the next thing to do for each |
+| Pipeline | What is wrong with this one, and since when? Its runs (each links to its run), duration and peak memory per run, its to-do list, its latest runs |
+| Run | Why did it fail, and what do I run next? Then its steps (busy or waiting), memory by step, resources, tables, cursors, and the error's chain and traceback |
+| Actions | Everything to do, worst first: FIX (failing, at risk) and TUNE |
+| Failures, Completeness, Speed, Capacity | Across pipelines, for digging in: each opens with its findings, then the evidence |
+| Profile | The functions a `--profile` run spent its time in, per step |
+
+One list feeds the overview, a pipeline's to-do list, and Actions (`model/triage.py`): pipelines
+whose latest runs failed or were killed, health signals only thresholds can judge (late, slow),
+and the advisor (memory, a slower release, gaps and cursor holes, duplicates, workers).
 
 - **Layers**: `app` (frontends) → `pages` → `model` (frames to facts, Polars) and `render`
   (primitives to styled text, encoded as HTML or ANSI) → `theme`. `lint-imports` enforces it,
@@ -438,8 +443,8 @@ Each command reads `MONITORING__URI` (as runs do), or `--uri`, or `--demo` for g
 - **Dirty data is handled in `model/facts.py`**: duplicate records, older record shapes, runs with
   no end (running until they outlive their pipeline's p99 duration, then lost, timed from their
   last sample), empty ranges ("NO SIGNAL"), and UTC throughout.
-- **Health** uses `pipeline health`'s rules and this environment's `[health]` thresholds; where
-  none are stated, the panel says so.
+- **Health** uses `pipeline health`'s rules and this environment's `[health]` thresholds where
+  it states them; failing pipelines are found from the runs alone either way.
 
 ## Scraping
 

@@ -90,6 +90,16 @@ def test_html_escapes_styles_and_shows_tooltips_from_the_style() -> None:
     assert '<span class="t-ok" title="run 1 &amp; more">&lt;b&gt;</span> plain' in out
 
 
+def test_html_links_a_target_where_the_frontend_says_it_lives() -> None:
+    def href(target: str) -> str | None:
+        return "pipeline-a.html" if target == "pipeline/a" else None
+
+    out = html([[("a", "text||pipeline/a"), ("b", "text|tip|run/x")]], href=href)
+    assert '<a href="pipeline-a.html" target="_self"><span class="t-text">a</span></a>' in out
+    assert '<span class="t-text" title="tip">b</span>' in out and out.count("<a ") == 1
+    assert ansi([[("a", "text||pipeline/a")]], colour=False) == "a"
+
+
 def test_ansi_colours_known_styles_or_writes_plain_text() -> None:
     assert ansi([[("ok", "ok"), (" x", "nope")]]) == "\x1b[38;2;57;255;20mok\x1b[0m x"
     assert ansi([[("ok", "ok|tip")]], colour=False) == "ok"

@@ -1,6 +1,7 @@
 """Encoders: one block, drawn for the web (HTML) or a terminal (ANSI colour)."""
 
 import html as _html
+from collections.abc import Callable
 
 from dashboard.render.text import Block
 from dashboard.theme import COLOURS
@@ -13,20 +14,24 @@ FONTS = (
 """The fonts the look is designed for, loaded by the browser; monospace stands in without them."""
 
 
-def html(block: Block, title: str | None = None) -> str:
-    """A ``<pre>`` of styled spans (classes ``t-<style>``, styled by ``stylesheet``); a style of
-    ``"ok|a tooltip"`` also shows the tooltip on hover."""
+def html(
+    block: Block, title: str | None = None, href: Callable[[str], str | None] | None = None
+) -> str:
+    """A ``<pre>`` of styled spans (classes ``t-<style>``, styled by ``stylesheet``). A style of
+    ``"ok|a tooltip"`` shows the tooltip on hover; ``"ok|tip|run/ID"`` also links, to where
+    ``href`` says that target lives (no link where it says ``None``)."""
     rows = []
     for line in block:
         parts = []
         for shown, styled in line:
-            style, _, tip = (styled or "").partition("|")
+            style, tip, target = [*(styled or "").split("|"), "", ""][:3]
             cls = f' class="t-{style}"' if style else ""
             hint = f' title="{_html.escape(tip)}"' if tip else ""
+            text = _html.escape(shown)
+            part = f"<span{cls}{hint}>{text}</span>" if cls or hint else text
+            link = href(target) if href and target else None
             parts.append(
-                f"<span{cls}{hint}>{_html.escape(shown)}</span>"
-                if cls or hint
-                else _html.escape(shown)
+                f'<a href="{_html.escape(link)}" target="_self">{part}</a>' if link else part
             )
         rows.append("".join(parts))
     label = f' aria-label="{_html.escape(title)}"' if title else ""
@@ -70,6 +75,8 @@ def stylesheet(scanlines: bool = True) -> str:
   box-shadow: inset 0 0 40px rgba(0,255,120,.06), 0 0 0 1px {COLOURS["dim"]}66;
 }}
 .term span[title] {{ cursor: help; }}
+.term a {{ text-decoration: none; }}
+.term a:hover span {{ text-decoration: underline; }}
 {styles}
 """
 
