@@ -90,10 +90,6 @@ explicit_package_bases = true
 module = ["fsspec.*"]  # untyped; installed with dlt
 ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-module = ["streamlit.*"]  # the dashboard extra; checked against its types once installed
-ignore_missing_imports = true
-
 [tool.importlinter]
 root_packages = ["dlt_framework", "dashboard"]
 
@@ -104,11 +100,11 @@ source_modules = ["dlt_framework"]
 forbidden_modules = ["dashboard"]
 
 [[tool.importlinter.contracts]]
-name = "dashboard: app -> pages -> model and render -> theme"
+name = "dashboard: app -> web -> model and render -> theme"
 type = "layers"
 layers = [
     "dashboard.app",
-    "dashboard.pages",
+    "dashboard.web",
     "dashboard.model | dashboard.render",
     "dashboard.theme | dashboard.units",
 ]

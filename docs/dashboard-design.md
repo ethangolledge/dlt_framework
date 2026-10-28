@@ -1,6 +1,30 @@
 # Dashboard design: from the data we have to what an engineer needs
 
-Status: **agreed and built, 2026-10-28.** Replaces the page list in `dashboard-plan.md`.
+Status: **built, 2026-10-28, as revised in section 0.** Replaces `dashboard-plan.md`.
+
+## 0. Revision: pipelines and runs apart, in the browser
+
+The five ASCII pages of section 4 still mixed two things, and drew them in a medium that could
+not draw them well. Revised:
+
+- **Pipelines and runs are different things, on different pages.** A pipeline is lasting: what
+  it reads and writes, its resources and cursors, its health over time. A run is one event of
+  it. *Pipelines* lists every pipeline; *Pipeline* shows one; *Runs* lists runs; *Run* shows
+  one in full, to debug it.
+- **The overview is a picture, not a table:** a heatmap of pipelines by day, each day its runs'
+  outcomes stacked (a day that broke then recovered reads differently from one that only
+  broke), brighter for more runs, with runs and rows per day beneath on the same columns. It
+  scales to hundreds of pipelines, with a filter.
+- **A browser app, not ASCII.** Hand-written JavaScript and SVG in the same black-and-neon
+  look, fed a data snapshot from the Python model (`dashboard/web`). Its controls (the days,
+  runs or backfills, search, a dropdown of pipelines) live in the page and in its URL; the old
+  static ASCII export had none, which is why no date range could be seen. It loads nothing
+  from elsewhere, and works opened from disk; serving it live can come later without changing
+  the page.
+- **A small command line** stays, for SSH and alerts: `status` (exits 1 while a pipeline
+  fails) and `run ID`. The ASCII pages, and the Streamlit app that served them, are gone.
+- Every page is checked in a headless browser by the tests, where one is installed.
+
 
 ## 1. What the data is
 

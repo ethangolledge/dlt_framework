@@ -405,30 +405,34 @@ a failed post is one line on stderr (never the URL) that never fails a run.
 
 ## Dashboard
 
-`dashboard/` draws the monitoring frames as a terminal-styled, black-and-neon dashboard: box
-panels, sparklines, braille charts, gantt timelines, and heatmaps, every state a glyph as well
-as a colour. It reads the frames and nothing else (no pipeline code, destination, or dlt state),
-so it works for any pipeline and source type, wherever the frames can be read.
+`dashboard/` turns the monitoring frames into a browser dashboard, black and neon: a page you
+open from disk or host anywhere files are served. It reads the frames and nothing else (no
+pipeline code, destination, or dlt state), so it works for any pipeline and source type. The
+page is plain JavaScript and SVG; it loads nothing from elsewhere.
 
 ```bash
-pipeline-dashboard show [PAGE] [PIPELINE] [--run RUN] [--from DAY --to DAY | --since 14d]
-                        [--pipeline P] [--mode run]
-pipeline-dashboard serve [--port 8501]                 # web app (the dashboard extra)
-pipeline-dashboard export FOLDER [--since 14d]         # static HTML, linked, for any web host
+pipeline-dashboard build .dashboard        # then open .dashboard/index.html
+pipeline-dashboard status                  # health now, a line a pipeline; exits 1 while one fails
+pipeline-dashboard run 3f9fe3f6            # one run: how it ended, the error, the command to run
 ```
 
-Each command reads `MONITORING__URI` (as runs do), or `--uri`, and shows the last 14 days
-unless given a range of days (`--from 2026-10-01 --to 2026-10-14`; a date range on the web). The design, and why, is in
-`docs/dashboard-design.md`: each page answers one question with its first line, shows the
-filters in force and what is selected, and every claim shows its evidence.
+Each reads `MONITORING__URI` (as runs do), or `--uri`. The built folder holds monitoring data:
+`.dashboard/` is in `.gitignore`; keep any other folder out of version control too.
+
+In the page, the days shown (the last 14 unless others are picked), and whether runs, backfills,
+or both, are chosen at the top and kept in the URL, so a view can be bookmarked. Pipelines and
+runs are different things, and have different pages:
 
 | Page | Answers |
 | --- | --- |
-| Overview | Is production OK? Incremental runs only: every pipeline worst first (last run, last success, recent runs, what is wrong now), open incidents with the command to run, what is at risk, and one line on backfills |
-| Runs | What is this pipeline, what is it doing, and what happened in this run? One pipeline, picked from a dropdown and named at the top; what it is (source, destination, each resource's write mode, cursor, and history); its runs, newest first; the chosen run in full (what broke and the command, the error, steps, memory, each resource's rows and cursor before and after) |
-| Backfills | What history is missing, and how do I fill it? Per declared history: a ribbon of what is loaded, and a row per missing range with its dates, why, and the command; holes in incremental cursors; the backfill jobs and where a failed one stopped |
-| Incidents | What broke, is it still broken, and how often? Open and resolved incidents, each with all its causes counted, and causes by day |
-| Tuning | What would make it faster, cheaper, steadier? The checks' findings with evidence, the evidence panels the records support, and the checks that could not run with what they need |
+| Overview | Is ingestion healthy? Every pipeline's state now; a heatmap of pipelines by day, each day its runs' outcomes stacked; runs and rows per day; open incidents with the command to run; what is at risk |
+| Pipelines | Which pipelines are there? A card each: source and destination, resources and cursors, last success, its latest runs; searchable |
+| Pipeline | What is this pipeline? What it reads and writes (each resource's write mode, cursor, history, rows, and destination tables), its runs over time, where each cursor stood after each load |
+| Runs | Which runs happened? Every run in range, by pipeline and outcome, on a timeline and in a list |
+| Run | What happened in this run? How it ended and the command to run next; the error (cause, where, chain, traceback); steps and memory on one time axis; what each resource loaded, cursor before and after |
+| Backfills | What history is missing? Per declared history a ribbon of what is loaded, and each missing range with its dates, why, and the command; holes in incremental cursors; backfill jobs |
+| Incidents | What broke, and is it fixed? Open and resolved incidents with every cause counted, and causes by day |
+| Tuning | What should change? The checks' findings with evidence, memory per pipeline, steps, slow tables, and the checks that could not run with what they need |
 
 - **Incidents** (`model/incidents.py`): a streak of failed or killed runs of one pipeline in
   one mode, from the first to the next success. Open until then, resolved after, so the open
@@ -440,14 +444,12 @@ filters in force and what is selected, and every claim shows its evidence.
   the data it needs and runs only when it is there; thresholds are `Limits`, overridable in
   `[dashboard.checks]`. A killed run is called a memory kill only when its peak was near a
   known limit.
-
-- **Layers**: `app` (frontends) → `pages` → `model` (frames to facts, Polars) and `render`
-  (primitives to styled text, encoded as HTML or ANSI) → `theme`. `lint-imports` enforces it,
-  and that the framework never imports the dashboard. A new frontend is one module in `app/`; a
-  new page is one function registered with `@page`.
+- **Layers**: `app` (the command line) → `web` (the data snapshot, the page) → `model` (frames
+  to facts, Polars) and `render` (terminal text) → `theme`. `lint-imports` enforces it, and that
+  the framework never imports the dashboard.
 - **Dirty data is handled in `model/facts.py`**: duplicate records, older record shapes, runs with
   no end (running until they outlive their pipeline's p99 duration, then lost, timed from their
-  last sample), empty ranges ("NO SIGNAL"), and UTC throughout.
+  last sample), and UTC throughout.
 - **Health** adds what only its `[health]` thresholds can judge (late, slower than usual,
   unusual rows); incidents, checks, and gaps say the rest, from the frames alone.
 

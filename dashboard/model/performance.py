@@ -89,25 +89,6 @@ def slow_tables(view: View) -> pl.DataFrame:
     )
 
 
-def retries(view: View) -> pl.DataFrame:
-    """Failed attempts that were tried again (a later attempt of the same step in the same run),
-    by step and cause, and how many runs they hit. A step's last failed attempt is a failure,
-    not a retry: Failures shows those."""
-    steps = view.steps
-    tries = steps.group_by("run_id", "step").agg(last=pl.col("attempt").max())
-    retried = (
-        steps.filter(pl.col("outcome") == "failed")
-        .join(tries, on=["run_id", "step"])
-        .filter(pl.col("attempt") < pl.col("last"))
-        .join(view.runs.select("run_id", "pipeline_id"), on="run_id")
-    )
-    return (
-        retried.group_by("pipeline_id", "step", "error_cause_type")
-        .agg(attempts=pl.len(), runs=pl.col("run_id").n_unique(), last=pl.col("at").max())
-        .sort("attempts", descending=True)
-    )
-
-
 def by_version(view: View) -> pl.DataFrame:
     """Median duration and rows of successful runs per pipeline and code version, in the order
     versions first appeared: a step up after a release shows here."""
@@ -122,11 +103,3 @@ def by_version(view: View) -> pl.DataFrame:
         )
         .sort("pipeline_id", "first")
     )
-
-
-def durations(view: View) -> dict[str, list[float | None]]:
-    """Each pipeline's run durations in scope, oldest first."""
-    return {
-        str(key[0]): own.sort("started_at")["duration_s"].to_list()
-        for key, own in view.runs.group_by("pipeline_id")
-    }

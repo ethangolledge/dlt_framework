@@ -11,3 +11,4 @@ dist/
 test_data/*
 .coverage
 dlt_state/
+.dashboard/

@@ -309,10 +309,6 @@ def test_capacity_sizes_from_the_p99_peak_and_rounds_up() -> None:
     assert row["share"] == pytest.approx(1004 / 2048, abs=0.001)
 
 
-def test_concurrency_counts_runs_overlapping_not_runs_in_a_bucket(hand) -> None:
-    assert capacity.concurrency(hand, 10)["runs"].max() <= 3  # short runs, one or two at a time
-
-
 # ---- triage --------------------------------------------------------------------------------
 
 

@@ -1,23 +1,33 @@
-"""``pipeline-dashboard``: any page in a terminal (for SSH, cron, an incident channel), the
-web app, or every page as static HTML."""
+"""``pipeline-dashboard``: build the browser dashboard, or ask the terminal two questions.
+
+- ``build FOLDER``: the dashboard, written to a folder to open or host (``dashboard/web``).
+- ``status``: is ingestion healthy? One line per pipeline, worst first. Exits 1 while any
+  pipeline is failing, so a cron job or an orchestrator can alert on it.
+- ``run ID``: what happened in one run: how it ended, the error, and the command to run next.
+
+Each reads ``MONITORING__URI`` (as runs do), or ``--uri``.
+"""
 
 import argparse
-import shutil
-import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
-from datetime import UTC, date, datetime
-from html import escape
+from datetime import UTC, datetime
 from pathlib import Path
 
-from dashboard.app.session import RANGES, Choices, draw, load
-from dashboard.model import incidents
+import polars as pl
+
+from dashboard.model import checks, gaps, incidents, overview, source, triage
 from dashboard.model.facts import Scope, View
-from dashboard.pages import PAGES
-from dashboard.pages.runs import LISTED
-from dashboard.render.encode import FONTS, ansi, html, stylesheet
-from dashboard.theme import COLOURS
+from dashboard.render.encode import ansi
+from dashboard.render.text import Block, Line, fit, join, span
+from dashboard.web import build, snapshot
+
+STATES = {
+    "error": ("✖", "error", "FAILING"),
+    "warning": ("⚠", "warn", "AT RISK"),
+    "ok": ("█", "ok", "HEALTHY"),
+    "idle": ("·", "muted", "NO RECENT RUNS"),
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -25,156 +35,142 @@ def main(argv: Sequence[str] | None = None) -> int:
     return int(args.command(args) or 0)
 
 
-def _show(args: argparse.Namespace) -> None:
-    choices = Choices(
-        page=args.page,
-        since=args.since,
-        pipelines=tuple(args.pipeline or ()),
-        modes=tuple(args.mode or ()),
-        first=args.first,
-        last=args.last,
-        run_id=args.run,
-        focus=args.subject,
-        size=args.width or shutil.get_terminal_size((140, 40)).columns,
-    )
-    print(
-        ansi(
-            draw(load(args.uri), choices),
-            colour=(not args.no_colour and sys.stdout.isatty()) or args.colour,
-        )
-    )
+def _build(args: argparse.Namespace) -> None:
+    frames = source.read(source.monitoring_uri(args.uri))
+    now = datetime.now(UTC)
+    signals = source.signals(frames, View.build(frames, Scope.last("all", now), now).pipelines)
+    held = build.build(Path(args.folder), frames, now, signals)
+    print(f"dashboard written to {args.folder}/index.html ({held} runs); open it in a browser")
 
 
-def _serve(args: argparse.Namespace) -> int:
-    """The web app, through Streamlit (the ``dashboard`` extra)."""
-    app = Path(__file__).with_name("web.py")
-    forwarded = ["--uri", args.uri] if args.uri else []
-    command = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(app),
-        "--server.port",
-        str(args.port),
-        "--",
-        *forwarded,
+def _status(args: argparse.Namespace) -> int:
+    frames = source.read(source.monitoring_uri(args.uri))
+    now = datetime.now(UTC)
+    everything = View.build(frames, Scope.last("all", now), now)
+    production = View.build(frames, Scope.last(f"{snapshot.DAYS}d", now), now).mode("run")
+    found = [item for item in incidents.incidents(everything) if item.open]
+    missing = gaps.holes(everything) + [m for h in gaps.histories(everything) for m in h.missing]
+    states = triage.statuses(
+        production,
+        found,
+        checks.run(production),
+        missing,
+        source.signals(frames, everything.pipelines),
+    )
+    fresh = dict(overview.freshness(everything).select("pipeline_id", "age").iter_rows())
+    counts = {key: sum(s.level == key for s in states) for key in STATES}
+    lines: Block = [
+        span(
+            f"dlt//ops · {now:%Y-%m-%d %H:%M}Z · judged over the last {snapshot.DAYS} days", "muted"
+        ),
+        join(
+            *(
+                join(span(f"{STATES[k][0]} {n} {STATES[k][2]}", STATES[k][1]), span("   "))
+                for k, n in counts.items()
+                if n
+            )
+        ),
     ]
-    return subprocess.call(command)
-
-
-def _export(args: argparse.Namespace) -> None:
-    """Every page as static HTML, for hosting anywhere files are served: the Runs page of each
-    pipeline, and of each run it lists or an incident names, so every link leads somewhere."""
-    folder = Path(args.folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    frames, now = load(args.uri), datetime.now(UTC)
-    view = View.build(frames, Scope.last(args.since, now), now)
-    listed = view.runs.sort("started_at", descending=True).group_by("pipeline_id").head(LISTED)
-    named = [run for item in incidents.incidents(view) for run in item.runs]
-    runs = {
-        *zip(listed["pipeline_id"], listed["run_id"], strict=True),
-        *((run["pipeline_id"], run["run_id"]) for run in named),
-    }
-
-    def href(target: str) -> str:
-        kind, _, key = target.partition("/")
-        pipeline, _, run_id = key.partition("/")
-        if kind == "run" and (pipeline, run_id) in runs:
-            return f"runs-{pipeline}-{run_id}.html"
-        return f"runs-{pipeline}.html"
-
-    pages = [(_file(key), Choices(page=key)) for key in PAGES]
-    pages += [(f"runs-{name}.html", Choices("runs", focus=name)) for name in view.pipelines]
-    pages += [
-        (f"runs-{pipeline}-{run_id}.html", Choices("runs", focus=pipeline, run_id=run_id))
-        for pipeline, run_id in sorted(runs)
-    ]
-    for name, choices in pages:
-        chosen = replace(choices, since=args.since, size=args.width)
-        body = html(draw(frames, chosen, now), PAGES[chosen.page].title, href)
-        picker = _picker(view.pipelines, chosen.focus) if chosen.page == "runs" else ""
-        (folder / name).write_text(
-            _site(PAGES[chosen.page].title, chosen.page, picker + body), "utf-8"
+    width = max((len(s.pipeline) for s in states), default=8) + 2
+    for status in states:
+        glyph, style, _ = STATES[status.level]
+        age = fresh.get(status.pipeline)
+        line: Line = join(
+            span(f"{glyph} ", style),
+            fit(span(status.pipeline, "bright"), width),
+            span(status.headline, style if status.level != "ok" else "muted"),
+            span(f"   last ok {_ago(age) if age is not None else 'never'}", "dim"),
         )
-    print(f"{len(pages)} pages written to {folder}/index.html")
+        if status.incident:
+            line = join(line, span(f"   → $ {incidents.rerun(status.incident.latest)}", "ok"))
+        lines.append(line)
+    _print(lines, args)
+    return 1 if counts["error"] else 0
 
 
-def _picker(names: list[str], chosen: str | None) -> str:
-    """A dropdown of every pipeline, opening its Runs page: it scales where tabs do not."""
-    options = "".join(
-        f'<option value="runs-{escape(name)}.html"{" selected" if name == chosen else ""}>'
-        f"{escape(name)}</option>"
-        for name in names
-    )
-    return (
-        f'<label class="pick">pipeline ({len(names)}) '
-        f'<select onchange="location.href=this.value">{options}</select></label>'
-    )
+def _run(args: argparse.Namespace) -> int:
+    frames = source.read(source.monitoring_uri(args.uri))
+    now = datetime.now(UTC)
+    history = View.build(frames, Scope.last("all", now), now).history
+    found = history.filter(pl.col("run_id").str.starts_with(args.id))
+    if found.height != 1:
+        print(f"{found.height} runs start with {args.id!r}: give more of the id", file=sys.stderr)
+        return 2
+    run = found.row(0, named=True)
+    detail = snapshot.detail(frames, run["run_id"])
+    error = detail["error"]
+    broken = run["outcome"] in incidents.BROKEN
+    word = "KILLED" if run["outcome"] == "lost" else str(run["outcome"]).upper()
+    style = {"succeeded": "ok", "retried": "warn", "running": "info"}.get(run["outcome"], "error")
+    lines: Block = [
+        join(
+            span(f"run {run['run_id']} · ", "muted"),
+            span(str(run["pipeline_id"]), "bright"),
+            span(f" · {run['mode']} · {run['started_at']:%Y-%m-%d %H:%M:%S}Z", "muted"),
+        ),
+        join(span(f"{word}  ", style), span(incidents.detail(run) if broken else "", style)),
+    ]
+    for name, value in (
+        (
+            "cause",
+            f"{error.get('cause_type')}: {error.get('message')}"
+            if error.get("cause_type")
+            else None,
+        ),
+        ("our code", error.get("where")),
+        ("raised in", error.get("origin")),
+        ("window", error.get("window")),
+    ):
+        if value:
+            lines.append(join(span(f"  {name:<10}", "muted"), span(str(value), "text")))
+    for load in detail["loads"]:
+        before, after = load["cursor"] if load["kind"] == "increment" else load["window"]
+        lines.append(
+            join(
+                span(f"  loaded    {load['resource']}: {load['rows']:,} rows", "text"),
+                span(f"  {before or '·'} → {after or '·'}", "dim") if before or after else [],
+            )
+        )
+    if broken:
+        lines.append(
+            join(span("fix the cause, then  ", "muted"), span(f"$ {incidents.rerun(run)}", "ok"))
+        )
+    _print(lines, args)
+    return 0
 
 
-def _site(title: str, current: str, body: str) -> str:
-    links = " ".join(
-        f'<a class="{"on" if key == current else ""}" href="{_file(key)}">{page.title}</a>'
-        for key, page in PAGES.items()
-    )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dlt//ops: {title}</title>
-{FONTS}
-<style>
-body {{ background: {COLOURS["background"]}; color: {COLOURS["text"]}; margin: 0;
-       padding: 12px 16px; font-family: 'JetBrains Mono', ui-monospace, monospace; }}
-nav {{ margin: 0 0 8px 0; font-size: 13px; }}
-nav a {{ color: {COLOURS["muted"]}; text-decoration: none; margin-right: 14px; }}
-nav a.on, nav a:hover {{ color: {COLOURS["ok"]}; text-shadow: 0 0 8px {COLOURS["ok"]}; }}
-label.pick {{ display: block; margin: 0 0 8px 0; font-size: 13px; color: {COLOURS["info"]}; }}
-label.pick select {{ background: {COLOURS["panel"]}; color: {COLOURS["bright"]};
-                    border: 1px solid {COLOURS["dim"]}; font: inherit; padding: 2px 6px; }}
-{stylesheet()}
-</style></head>
-<body><nav>{links}</nav>{body}</body></html>
-"""
+def _ago(delta: object) -> str:
+    seconds = delta.total_seconds()  # type: ignore[attr-defined]
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "just now"
 
 
-def _file(key: str) -> str:
-    return "index.html" if key == "overview" else f"{key}.html"
+def _print(lines: Block, args: argparse.Namespace) -> None:
+    colour = (sys.stdout.isatty() and not args.no_colour) or args.colour
+    print(ansi(lines, colour=colour))
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pipeline-dashboard")
+    parser = argparse.ArgumentParser(prog="pipeline-dashboard", description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(required=True)
 
-    def source(sub: argparse.ArgumentParser) -> None:
+    def common(sub: argparse.ArgumentParser) -> argparse.ArgumentParser:
         sub.add_argument("--uri", help="monitoring URI; MONITORING__URI when omitted")
+        sub.add_argument("--no-colour", action="store_true")
+        sub.add_argument("--colour", action="store_true", help="colour even when not a terminal")
+        return sub
 
-    show = commands.add_parser("show", help="draw a page in the terminal")
-    show.set_defaults(command=_show)
-    show.add_argument("page", choices=list(PAGES), nargs="?", default="overview")
-    show.add_argument("subject", nargs="?", help="the pipeline the Runs page shows")
-    show.add_argument("--since", choices=RANGES, default="14d", help="back from now")
-    show.add_argument("--from", dest="first", type=date.fromisoformat, help="first day, 2026-10-01")
-    show.add_argument("--to", dest="last", type=date.fromisoformat, help="last day, inclusive")
-    show.add_argument("--pipeline", action="append", help="only this pipeline; repeat for several")
-    show.add_argument("--mode", action="append", choices=["run", "backfill"])
-    show.add_argument("--run", help="the run the Runs page opens")
-    show.add_argument("--width", type=int, help="columns; the terminal's when omitted")
-    show.add_argument("--no-colour", action="store_true")
-    show.add_argument("--colour", action="store_true", help="colour even when not a terminal")
-    source(show)
-
-    serve = commands.add_parser("serve", help="the web app (needs the dashboard extra)")
-    serve.set_defaults(command=_serve)
-    serve.add_argument("--port", type=int, default=8501)
-    source(serve)
-
-    exported = commands.add_parser("export", help="every page as static HTML, for any web host")
-    exported.set_defaults(command=_export)
-    exported.add_argument("folder")
-    exported.add_argument("--since", choices=RANGES, default="14d")
-    exported.add_argument("--width", type=int, default=170)
-    source(exported)
+    built = common(commands.add_parser("build", help="write the browser dashboard to a folder"))
+    built.set_defaults(command=_build)
+    built.add_argument("folder")
+    common(commands.add_parser("status", help="health now, a line a pipeline")).set_defaults(
+        command=_status
+    )
+    one = common(commands.add_parser("run", help="one run: how it ended, and what to run next"))
+    one.set_defaults(command=_run)
+    one.add_argument("id", help="the run id, or enough of its start to be unique")
     return parser
 
 

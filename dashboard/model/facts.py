@@ -386,20 +386,3 @@ class View:
     def run(self, run_id: str) -> dict[str, Any] | None:
         found = self.history.filter(pl.col("run_id") == run_id)
         return found.row(0, named=True) if found.height else None
-
-
-def buckets(scope: Scope, count: int) -> list[datetime]:
-    """``count`` equal bucket starts across the scope."""
-    step = scope.length / count
-    return [scope.start + step * index for index in range(count)]
-
-
-def bucket_of(column: str, scope: Scope, count: int) -> pl.Expr:
-    """The bucket (0 to ``count - 1``) a time column falls in."""
-    seconds = scope.length.total_seconds() / count
-    return (
-        ((pl.col(column) - pl.lit(scope.start)).dt.total_seconds(fractional=True) / seconds)
-        .floor()
-        .cast(pl.Int64)
-        .clip(0, count - 1)
-    )

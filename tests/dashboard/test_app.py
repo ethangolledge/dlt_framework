@@ -1,95 +1,73 @@
-"""The frontends, reading frames through a monitoring sink as they would in use: the terminal
-command, the static export, and the web app's smoke test."""
+"""The command line, reading frames through a monitoring sink as it would in use."""
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 import scenarios
 
 from dashboard.app import terminal
-from dashboard.pages import PAGES
-from dlt_framework.core.monitoring import ParquetSink
+from dlt_framework.core.monitoring import Frames, ParquetSink
 from dlt_framework.core.monitoring.records import RECORDS
+
+
+def sink(folder: Path, *parts: Frames) -> str:
+    """A Parquet monitoring folder holding ``parts``; its URI."""
+    writer = ParquetSink(str(folder))
+    for record in RECORDS:
+        frame = pl.concat([getattr(part, record.name) for part in parts], how="diagonal_relaxed")
+        if frame.height:
+            writer.write(record.name, frame)
+    return f"file://{folder}"
 
 
 @pytest.fixture
 def uri(tmp_path: Path) -> str:
-    """A Parquet monitoring folder holding the hand-run and backfill scenarios."""
-    folder = tmp_path / "monitoring"
-    sink = ParquetSink(str(folder))
-    for frames in (scenarios.hand_runs(), scenarios.backfilled()):
-        for record in RECORDS:
-            frame = getattr(frames, record.name)
-            if frame.height:
-                sink.write(record.name, frame)
-    return f"file://{folder}"
+    return sink(tmp_path / "monitoring", scenarios.hand_runs(), scenarios.backfilled())
 
 
-def show(uri: str, *args: str) -> list[str]:
-    argv = ["show", *args, "--uri", uri, "--since", "all", "--width", "140", "--no-colour"]
-    assert terminal.main(argv) == 0
-    return []
+def test_status_lists_every_pipeline_worst_first_and_fails_while_one_fails(uri, capsys) -> None:
+    assert terminal.main(["status", "--uri", uri, "--no-colour"]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1].startswith("✖ 1 FAILING")
+    assert lines[2].startswith("✖ form4") and "→ $ pipeline run form4" in lines[2]
+    names = {line.split()[1] for line in lines[2:]}
+    assert names == {"form4", "shop", "filings", "insider", "members"}
 
 
-@pytest.mark.parametrize("key", list(PAGES))
-def test_the_terminal_shows_every_page(key, uri, capsys) -> None:
-    show(uri, key)
+def test_status_succeeds_when_nothing_fails(tmp_path, capsys) -> None:
+    healthy = scenarios.Frames_().add(*scenarios.run("p", scenarios.NOW)).frames()
+    assert terminal.main(["status", "--uri", sink(tmp_path / "m", healthy), "--no-colour"]) == 0
+    assert "█ 1 HEALTHY" in capsys.readouterr().out
+
+
+def test_run_shows_how_one_run_ended_and_what_to_run(uri, capsys) -> None:
+    assert terminal.main(["run", "form4-si", "--uri", uri, "--no-colour"]) == 0
     out = capsys.readouterr().out
-    assert "DLT//OPS" in out and "\x1b[" not in out
+    assert "FAILED  stopped by SIGTERM" in out and "$ pipeline run form4" in out
 
 
-def test_the_terminal_shows_the_pipeline_and_run_it_is_given(uri, capsys) -> None:
-    show(uri, "runs", "insider", "--run", "insider-killed-12")
-    out = capsys.readouterr().out
-    assert "PIPELINE  █ insider" in out and "KILLED" in out
-
-
-def test_the_terminal_shows_a_range_of_days(uri, capsys) -> None:
-    argv = ["show", "--uri", uri, "--from", "2026-10-25", "--to", "2026-10-26", "--no-colour"]
-    assert terminal.main([*argv, "--width", "120"]) == 0
-    assert "2026-10-25 00:00 → 2026-10-27 00:00Z" in capsys.readouterr().out
-
-
-def test_the_default_range_is_fourteen_days() -> None:
-    from dashboard.app.session import Choices
-
-    assert Choices().since == "14d"
+def test_run_asks_for_more_of_an_id_that_is_not_unique(uri, capsys) -> None:
+    assert terminal.main(["run", "form4", "--uri", uri]) == 2
+    assert "give more of the id" in capsys.readouterr().err
 
 
 def test_colour_is_on_when_asked(uri, capsys) -> None:
-    terminal.main(["show", "--uri", uri, "--width", "100", "--colour"])
+    terminal.main(["status", "--uri", uri, "--colour"])
     assert "\x1b[38;2;" in capsys.readouterr().out
 
 
-def test_export_writes_every_page_and_every_page_a_link_leads_to(uri, tmp_path, capsys) -> None:
-    site = tmp_path / "site"
-    assert terminal.main(["export", str(site), "--uri", uri, "--since", "all"]) == 0
-    written = {path.name for path in site.iterdir()}
-    assert {"index.html", *(f"{key}.html" for key in PAGES if key != "overview")} <= written
-    assert {"runs-form4.html", "runs-form4-form4-signal.html"} <= written
-    runs = (site / "runs-insider.html").read_text()
-    assert '<option value="runs-insider.html" selected>insider</option>' in runs
-    for page in written:
-        html = (site / page).read_text()
-        linked = {part.split('"', 1)[0] for part in html.split('href="')[1:]}
-        assert {link for link in linked if not link.startswith("https://")} <= written, page
+def test_build_writes_the_dashboard(uri, tmp_path, capsys) -> None:
+    assert terminal.main(["build", str(tmp_path / "site"), "--uri", uri]) == 0
+    assert (tmp_path / "site" / "index.html").exists()
+    assert "open it in a browser" in capsys.readouterr().out
 
 
-def test_the_terminal_reads_the_environment_monitoring_uri(make_pipeline, capsys) -> None:
+def test_commands_read_the_environment_monitoring_uri(make_pipeline, capsys) -> None:
     from conftest import ORDERS, Upstream
 
     from dlt_framework.core.run import IncrementalRun
 
     IncrementalRun(make_pipeline({ORDERS: Upstream([{"id": 1, "updated_at": 100}])}))()
-    assert terminal.main(["show", "--width", "120", "--no-colour", "--since", "1h"]) == 0
+    assert terminal.main(["status", "--no-colour"]) == 0
     assert "shop" in capsys.readouterr().out
-
-
-def test_the_web_app_draws_each_page(uri) -> None:
-    testing = pytest.importorskip("streamlit.testing.v1")
-
-    import dashboard.app.web as web_module
-
-    app = testing.AppTest.from_file(str(Path(web_module.__file__)), default_timeout=60)
-    app.run()
-    assert not app.exception
