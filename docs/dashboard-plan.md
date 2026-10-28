@@ -1,5 +1,9 @@
 # Dashboard plan: mission control for the pipelines
 
+> **Superseded (2026-10-28)** by `docs/dashboard-design.md`: five pages built from the data
+> real runs record, not from a generated demo. This plan is kept as the history of how the
+> dashboard got there.
+
 **Status (2026-10-27): built**, in `dashboard/`, as below, except:
 
 - The demo frames are generated from the framework's own records (`dashboard/demo.py`), not by

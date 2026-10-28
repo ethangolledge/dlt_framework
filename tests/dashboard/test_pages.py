@@ -1,40 +1,155 @@
-"""Every page draws, at every width, from empty frames, the demo, and real runs' frames."""
+"""Every page draws within its width from every shape of frames, and says what it must: the
+answer first, the selection visible, and every missing range or failure with what to do."""
 
 from datetime import UTC, datetime
 
 import pytest
+import scenarios
 from conftest import ORDERS, Upstream
+from scenarios import NOW
 
-from dashboard import demo
 from dashboard.model.facts import Scope, View
 from dashboard.pages import PAGES
 from dashboard.pages.base import Context
-from dashboard.render.text import plain, width
+from dashboard.render.text import Block, plain, width
 from dlt_framework.core.monitoring import Frames, ParquetSink
+from dlt_framework.core.monitoring.health import Signal
 from dlt_framework.core.run import IncrementalRun
 
-NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
+SHAPES = {
+    "hand_runs": scenarios.hand_runs,
+    "scheduled": scenarios.scheduled,
+    "backfilled": scenarios.backfilled,
+    "empty": Frames,
+}
 
 
-def draw(
-    frames: Frames, key: str, size: int, now: datetime = NOW, run_id: str | None = None
-) -> str:
-    view = View.build(frames, Scope.last("7d", now), now)
-    block = PAGES[key].draw(Context(view, size, None, run_id))
-    assert block and max(width(line) for line in block) <= size, f"{key} overflows {size}"
-    return plain(block)
+def block(
+    frames: Frames,
+    key: str,
+    size: int = 160,
+    *,
+    since: str = "7d",
+    now: datetime = NOW,
+    **chosen,
+) -> Block:
+    view = View.build(frames, Scope.last(since, now), now)
+    drawn = PAGES[key].draw(Context(view, size, chosen.pop("signals", None), **chosen))
+    assert drawn and max(width(line) for line in drawn) <= size, f"{key} overflows {size}"
+    return drawn
+
+
+def text(frames: Frames, key: str, **chosen) -> list[str]:
+    return [line.rstrip() for line in plain(block(frames, key, **chosen)).splitlines()]
 
 
 @pytest.mark.parametrize("key", list(PAGES))
+@pytest.mark.parametrize("shape", list(SHAPES))
 @pytest.mark.parametrize("size", [100, 160, 220])
-def test_every_page_draws_the_demo_within_its_width(key, size) -> None:
-    assert draw(demo.frames(NOW), key, size)
+def test_every_page_draws_every_shape_within_its_width(key, shape, size) -> None:
+    block(SHAPES[shape](), key, size)
 
 
 @pytest.mark.parametrize("key", list(PAGES))
-def test_every_page_says_no_signal_on_empty_frames(key) -> None:
-    text = draw(Frames(), key, 120)
-    assert "NO SIGNAL" in text or "✔" in text
+def test_every_page_shows_the_filters_in_force(key) -> None:
+    filters = text(scenarios.hand_runs(), key)[3]
+    assert filters.startswith("2026-10-21 12:00 → 2026-10-28 12:00Z · all pipelines")
+
+
+def test_the_overview_answers_first_then_says_who_and_what_to_run() -> None:
+    lines = text(scenarios.hand_runs(), "overview")
+    assert lines[5].startswith("✖ 1 FAILING    █ 3 HEALTHY")
+    rows = [line for line in lines if " ago " in line]
+    assert [row.split()[2] for row in rows] == ["form4", "filings", "insider", "members"]
+    joined = "\n".join(lines)
+    assert "ConfigFieldMissingException ×2, SignalReceivedException, killed" in joined
+    assert "→ fix it, then $ pipeline run form4" in joined
+    assert "BACKFILLS  none run in range, and no resource declares one" in joined
+
+
+def test_the_overview_counts_backfills_apart_from_production() -> None:
+    lines = text(scenarios.backfilled(), "overview")
+    assert lines[5].startswith("⚠ 1 AT RISK")  # its backfill failed; production runs are fine
+    assert any("orders: 4 range(s) missing" in line for line in lines)
+    assert any(line.startswith("BACKFILLS  2 job(s) in range, 1 failed") for line in lines)
+
+
+def test_health_shows_lateness_only_it_can_judge() -> None:
+    late = Signal("filings", None, "run_stale", "error", "no success for 30h")
+    lines = text(scenarios.hand_runs(), "overview", signals=[late])
+    assert lines[5].startswith("✖ 2 FAILING")
+
+
+def test_the_runs_page_names_every_pipeline_and_brackets_the_one_shown() -> None:
+    lines = text(scenarios.hand_runs(), "runs")
+    assert lines[5].startswith("PIPELINE  ✖ [form4] │ █ filings │ █ insider │ █ members")
+    assert lines[7].startswith("✖ FAILING  0 of 4 runs ok in range")
+    chosen = [line for line in lines if "▶" in line]
+    assert len(chosen) == 1 and "form4-si" in chosen[0]  # the open incident's latest run
+    joined = "\n".join(lines)
+    assert "→ fix the cause, then $ pipeline run form4" in joined
+    assert "not recorded for this run: steps, memory samples, tables" in joined
+
+
+def test_the_runs_page_opens_the_run_asked_for() -> None:
+    lines = text(scenarios.hand_runs(), "runs", focus="insider", run_id="insider-killed-12")
+    assert "[insider]" in lines[5]
+    (chosen,) = [line for line in lines if "▶" in line]
+    assert "killed" in chosen
+    assert any("KILLED" in line and "no end reported" in line for line in lines)
+
+
+def test_the_runs_page_shows_steps_memory_and_loads_where_recorded() -> None:
+    joined = "\n".join(text(scenarios.scheduled(), "runs"))
+    for title in ("STEPS", "MEMORY", "LOADED", "TABLES"):
+        assert f"─ {title} " in joined
+    assert "not recorded" not in joined
+
+
+def test_links_lead_to_a_pipeline_and_to_its_runs() -> None:
+    drawn = block(scenarios.hand_runs(), "overview")
+    targets = {
+        style.split("|")[2]
+        for line in drawn
+        for _, style in line
+        if style and style.count("|") == 2
+    }
+    assert "pipeline/form4" in targets
+    assert "run/form4/form4-signal" in targets
+
+
+def test_the_backfills_page_lists_each_missing_range_with_its_command() -> None:
+    lines = text(scenarios.backfilled(), "backfills")
+    joined = "\n".join(lines)
+    assert lines[5].startswith("✖ 4 RANGE(S) MISSING in 1 resource(s)")
+    assert "60% loaded" in joined
+    for kind in ("FAILED", "EMPTY", "OFF", "TWICE", "HOLE"):
+        assert any(line.lstrip("│ ").startswith(kind) for line in lines), kind
+    assert "$ pipeline backfill shop --resource orders --from 2026-10-07T00:00:00+00:00" in joined
+    assert "stopped at 2026-10-07 00:00  → $ pipeline backfill shop --resource orders" in joined
+
+
+def test_the_backfills_page_says_how_to_start_when_there_are_none() -> None:
+    joined = "\n".join(text(scenarios.hand_runs(), "backfills"))
+    assert "No resource declares a history" in joined and "TimeBackfill" in joined
+
+
+def test_the_incidents_page_keeps_open_and_resolved_apart() -> None:
+    lines = text(scenarios.hand_runs(), "incidents")
+    assert lines[5].startswith("✖ 1 OPEN   2 resolved in range")
+    joined = "\n".join(lines)
+    assert joined.index("─ OPEN ") < joined.index("form4") < joined.index("─ RESOLVED ")
+    assert "lasted" in joined and "killed ×3" in joined
+    assert "CAUSES BY DAY" in joined
+
+
+def test_the_tuning_page_finds_with_evidence_or_says_what_it_could_not_check() -> None:
+    full = "\n".join(text(scenarios.scheduled(), "tuning"))
+    assert "memory at 90% of its container limit   p99 peak 1.8G of 2G, 72 runs" in full
+    assert "→ give it 2.25G" in full
+    sparse = "\n".join(text(scenarios.hand_runs(), "tuning"))
+    assert "every check that could run found nothing to change" in sparse
+    assert "runs close to their memory" in sparse and "needs a memory limit" in sparse
 
 
 def test_pages_draw_the_frames_real_runs_write(make_pipeline, tmp_path) -> None:
@@ -42,54 +157,6 @@ def test_pages_draw_the_frames_real_runs_write(make_pipeline, tmp_path) -> None:
     frames = Frames.read(ParquetSink(str(tmp_path / "monitoring")))
     now = datetime.now(UTC)
     for key in PAGES:
-        draw(frames, key, 140, now)
-    run_id = frames.runs["run_id"][0]
-    text = draw(frames, "run", 140, now, run_id)
-    assert "SUCCEEDED" in text and "extract #1" in text and "orders" in text
-
-
-def test_the_run_page_leads_with_what_broke_and_what_to_run(week_frames) -> None:
-    text = draw(week_frames, "run", 160)  # with none chosen: the latest failure
-    lines = [line.rstrip() for line in text.splitlines()]
-    assert lines[3].startswith("✖ FAILED  scrape_filings  in extract · filings · HTTPError")
-    assert lines[4].endswith("then $ pipeline run scrape_filings")
-    assert any("TRACEBACK" in line for line in lines)
-
-
-def test_the_overview_answers_first_then_says_who_and_what_next(week_frames) -> None:
-    lines = draw(week_frames, "overview", 160).splitlines()
-    assert lines[3].startswith("✖ 1 FAILING    ⚠ 2 AT RISK    █ 1 HEALTHY")
-    rows = [line for line in lines if "ago" in line]
-    assert [row.split()[2] for row in rows] == [
-        "scrape_filings",
-        "erp_sql",
-        "orders_api",
-        "files_landing",
-    ]
-    assert "1 scrape_filings" in draw(week_frames, "overview", 160)
-
-
-def test_the_overview_shows_health_when_thresholds_apply(week_frames) -> None:
-    from dlt_framework.core.monitoring.health import Signal
-
-    view = View.build(week_frames, Scope.last("7d", NOW), NOW)
-    signal = Signal("files_landing", None, "run_stale", "error", "no success for 30h")
-    text = plain(PAGES["overview"].draw(Context(view, 160, [signal])))
-    assert "✖ 2 FAILING" in text and "late" in text
-
-
-def test_the_pipeline_page_tells_one_pipelines_story(week_frames) -> None:
-    view = View.build(week_frames, Scope.last("7d", NOW), NOW)
-    block = PAGES["pipeline"].draw(Context(view, 160, None, focus="erp_sql"))
-    text = plain(block)
-    assert text.splitlines()[3].startswith("⚠ AT RISK  memory at 92%")
-    assert "→ give it 4.8G" in text and "LATEST RUNS" in text
-    runs = {
-        style.split("|")[2] for line in block for _, style in line if style and "|run/" in style
-    }
-    assert runs <= {f"run/{run_id}" for run_id in view.runs["run_id"]} and runs
-
-
-@pytest.fixture(scope="module")
-def week_frames() -> Frames:
-    return demo.frames(NOW)
+        block(frames, key, 140, since="1h", now=now)
+    joined = "\n".join(text(frames, "runs", since="1h", now=now))
+    assert "SUCCEEDED" in joined and "extract #1" in joined and "orders" in joined

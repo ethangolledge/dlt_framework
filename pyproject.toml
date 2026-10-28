@@ -74,6 +74,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # Scrapling spiders are configured with class-level lists (start_urls, allowed_domains).
 "dlt_framework/sources/scrape/**" = ["RUF012"]
 "tests/test_scrape.py" = ["RUF012"]
+# The dashboard writes counts as "killed ×3"; its tests assert that text.
+"tests/dashboard/**" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

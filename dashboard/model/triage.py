@@ -1,145 +1,116 @@
-"""Triage: each pipeline's state, and one list of what to do about it, worst first.
+"""Triage: each production pipeline's state, from three things that do not overlap.
 
-Three sources feed the list. The runs themselves: a pipeline whose latest runs failed is
-failing, whatever thresholds say. The environment's health signals, where it states
-thresholds, for what only they can judge (late, slow). And the advisor. Every item is an
-``Advice``, so the overview, a pipeline's page, and the actions page tell the same story in
-the same words.
+- **Incidents** (``model/incidents.py``): an open one means it is failing.
+- **Missing data** (``model/gaps.py``): rows that should be there and are not.
+- **Warnings** from the checks, and from health where only its thresholds can judge: late
+  (against a stated or regular schedule), slower than usual, unusual rows.
+
+A pipeline is as bad as the worst of these. Health's other signals (failed, killed, memory,
+reconcile, gaps) are what incidents, checks, and gaps already say, so they are not read here.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
-import polars as pl
-
-from dashboard.model import advisor, failures
-from dashboard.model.advisor import Advice
+from dashboard.model import gaps
+from dashboard.model.checks import Report
 from dashboard.model.facts import View
-from dashboard.units import first_line
+from dashboard.model.incidents import Incident
 from dlt_framework.core.monitoring.health import Signal
 
-RANK = {"error": 0, "warning": 1, "info": 2, "ok": 3, "idle": 4}
-
-# Signals only health can raise; the rest (failed, lost, memory, reconcile, gaps) the runs and
-# the advisor already say, and the same fact twice is noise.
-_SIGNALS = {
-    "run_stale": ("reliability", "late", "check its schedule: the orchestrator may have stopped"),
-    "run_slow": ("performance", "slower than usual", "open its latest run"),
-    "retries_rising": ("reliability", "retrying more", "see Failures for the cause"),
-    "rows_anomaly": ("completeness", "unusual row count", "check upstream for a change"),
+RANK = {"error": 0, "warning": 1, "ok": 2, "idle": 3}
+_HEALTH = {  # event: (level, headline)
+    "run_stale": ("error", "late"),
+    "run_slow": ("warning", "slower than usual"),
+    "rows_anomaly": ("warning", "unusual row count"),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class Concern:
+    level: str  # "error" or "warning"
+    headline: str
+    detail: str  # the evidence, for a tooltip
 
 
 @dataclass(frozen=True, slots=True)
 class Status:
     pipeline: str
     level: str  # "error", "warning", "ok", or "idle": no runs in range
-    found: tuple[Advice, ...]  # its errors and warnings, worst first
+    incident: Incident | None  # its open incident in production
+    concerns: tuple[Concern, ...]  # worst first, the open incident included
 
     @property
     def headline(self) -> str:
-        """Its worst finding, and how many more."""
-        if not self.found:
+        if not self.concerns:
             return "no runs in range" if self.level == "idle" else "ok"
-        more = len(self.found) - 1
-        return self.found[0].finding + (f"  +{more}" if more else "")
+        more = len(self.concerns) - 1
+        return self.concerns[0].headline + (f"  +{more}" if more else "")
 
 
-def actions(view: View, signals: list[Signal] | None) -> list[Advice]:
-    """Everything to do, worst first: failing pipelines, then health, then the advisor."""
-    broken = failing(view)
-    down = {item.pipeline for item in broken}
-    advice = [
-        item
-        for item in advisor.advise(view)
-        # a cause recurring in a pipeline failing now is the same story as the failure
-        if not (item.area == "reliability" and any(item.concerns(name) for name in down))
-    ]
-    found = [*broken, *_health(signals or []), *advice]
-    return sorted(found, key=lambda item: (RANK[item.level], advisor.AREAS.index(item.area)))
-
-
-def failing(view: View) -> list[Advice]:
-    """Pipelines whose latest runs failed or were lost: how many in a row, why, and the fix."""
-    found = []
-    for pipeline in _pipelines(view):
-        own = view.history.filter(
-            (pl.col("pipeline_id") == pipeline)
-            & (pl.col("mode") == "run")
-            & (pl.col("outcome") != "running")
-        ).sort("started_at", descending=True)
-        streak = 0
-        for outcome in own["outcome"]:
-            if outcome not in failures.BROKEN:
-                break
-            streak += 1
-        if not streak:
-            continue
-        run = own.row(0, named=True)
-        found.append(explain(run, streak))
-    return found
-
-
-def explain(run: dict[str, Any], streak: int = 1) -> Advice:
-    """A failed or lost run as a finding: what happened, and the fix then the command."""
-    lost = run["outcome"] == "lost"
-    cause = "killed" if lost else str(run["error_cause_type"] or run["error_type"] or "error")
-    finding = (
-        f"{'killed' if lost else 'failed'} {streak} runs in a row"
-        if streak > 1
-        else f"last run {'killed' if lost else 'failed'}"
-    )
-    rerun = f"$ {failures.next_step(run)}"
-    where = run["error_where"]
-    return Advice(
-        "error",
-        "reliability",
-        str(run["pipeline_id"]),
-        finding if lost else f"{finding}: {cause}",
-        f"during {run['error_step'] or 'an unknown step'}, at its memory peak"
-        if lost
-        else f"{first_line(run['error_message'])}",
-        f"give it more memory, then {rerun}"
-        if lost
-        else f"fix {where}, then {rerun}"
-        if where
-        else f"read run {str(run['run_id'])[:8]}, then {rerun}",
-        run_id=str(run["run_id"]),
-    )
-
-
-def _health(signals: list[Signal]) -> list[Advice]:
-    found = []
-    for signal in signals:
-        if signal.event not in _SIGNALS:
-            continue
-        area, finding, action = _SIGNALS[signal.event]
-        found.append(
-            Advice(
-                "error" if signal.level == "error" else "warning",
-                area,
-                signal.pipeline,
-                f"{signal.resource}: {finding}" if signal.resource else finding,
-                signal.detail,
-                action,
-            )
-        )
-    return found
-
-
-def statuses(view: View, todo: list[Advice]) -> list[Status]:
-    """Every pipeline in scope, worst first; a pipeline is as bad as its worst finding."""
+def statuses(
+    view: View,
+    incidents: list[Incident],
+    report: Report,
+    missing: list[gaps.Missing],
+    signals: list[Signal] | None,
+) -> list[Status]:
+    """Every pipeline in scope, worst first."""
     active = set(view.runs["pipeline_id"].drop_nulls())
+    kept = view.scope.pipelines
     found = []
-    for pipeline in _pipelines(view):
-        mine = tuple(
-            item for item in todo if item.concerns(pipeline) and item.level in ("error", "warning")
+    for pipeline in (name for name in view.pipelines if not kept or name in kept):
+        incident = next(
+            (
+                item
+                for item in incidents
+                if item.open and item.pipeline == pipeline and item.mode == "run"
+            ),
+            None,
         )
-        level = mine[0].level if mine else "ok" if pipeline in active else "idle"
-        found.append(Status(pipeline, level, mine))
+        concerns = [
+            *_failing(incident),
+            *(
+                Concern(*_HEALTH[signal.event], signal.detail)
+                for signal in signals or []
+                if signal.pipeline == pipeline and signal.event in _HEALTH
+            ),
+            *(
+                Concern("warning", finding.title, finding.evidence)
+                for finding in report.findings
+                if finding.pipeline == pipeline and finding.level == "warning"
+            ),
+            *_missing(pipeline, missing),
+        ]
+        concerns.sort(key=lambda concern: RANK[concern.level])
+        level = concerns[0].level if concerns else "ok" if pipeline in active else "idle"
+        found.append(Status(pipeline, level, incident, tuple(concerns)))
     return sorted(found, key=lambda status: (RANK[status.level], status.pipeline))
 
 
-def _pipelines(view: View) -> list[str]:
-    kept = view.scope.pipelines
-    return [name for name in view.pipelines if not kept or name in kept]
+def _failing(incident: Incident | None) -> list[Concern]:
+    if incident is None:
+        return []
+    runs = len(incident.runs)
+    return [
+        Concern(
+            "error",
+            f"failing: {runs} run(s) since {incident.started_at:%m-%d %H:%M}",
+            incident.summary,
+        )
+    ]
+
+
+def _missing(pipeline: str, missing: list[gaps.Missing]) -> list[Concern]:
+    """Rows missing from a pipeline's tables, as one concern per resource."""
+    by_resource: dict[str, list[gaps.Missing]] = {}
+    for item in missing:
+        if item.pipeline == pipeline and item.kind in gaps.FIXABLE:
+            by_resource.setdefault(item.resource_id, []).append(item)
+    return [
+        Concern(
+            "warning",
+            f"{resource_id.split('.', 1)[1]}: {len(items)} range(s) missing",
+            "; ".join(gaps.edges(item) for item in items[:3]),
+        )
+        for resource_id, items in by_resource.items()
+    ]

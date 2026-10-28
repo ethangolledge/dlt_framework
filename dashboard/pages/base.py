@@ -1,20 +1,20 @@
 """What every page shares: its context, how it is registered, and the pieces several draw.
 
-Pages follow one story, so a reader never has to work out where to look:
+Pages follow the same rules (``docs/dashboard-design.md``):
 
-- a page answers one question, and its first line is the answer (the verdict);
+- a page answers one question, and its first line is the answer;
+- the filters in force are always shown, and so is what is selected;
 - what is wrong comes first and in colour; what is fine is quiet, or one line;
-- panels carry titles, not descriptions; a number's detail is in its tooltip;
-- every pipeline and run named links one level down: overview, pipeline, run.
+- panels carry titles, not descriptions; every claim shows its evidence;
+- a pipeline or run named links to it on the Runs page.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 
-from dashboard.model.advisor import Advice
 from dashboard.model.facts import View
-from dashboard.model.triage import Status
-from dashboard.render.primitives import legend, panel
+from dashboard.render.primitives import banner, legend, panel
 from dashboard.render.text import Block, Line, fit, join, span
 from dashboard.theme import LEVELS, OUTCOMES
 from dlt_framework.core.monitoring.health import Signal
@@ -23,13 +23,13 @@ from dlt_framework.core.monitoring.health import Signal
 @dataclass(frozen=True, slots=True)
 class Context:
     """What a page draws from: the facts in scope, the width to fill, the health signals
-    (``None`` where this environment states no thresholds), and the run or pipeline chosen."""
+    (``None`` where this environment states no thresholds), and the pipeline and run chosen."""
 
     view: View
     size: int
     signals: list[Signal] | None = None
     run_id: str | None = None
-    focus: str | None = None  # the pipeline a pipeline page shows
+    focus: str | None = None  # the pipeline chosen on the Runs page
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ class Page:
     key: str
     title: str
     draw: Callable[[Context], Block]
-    picks: str | None = None  # "run" or "pipeline": what the frontend offers to choose
+    picks: str | None = None  # "pipeline": the frontend offers a pipeline and a run to choose
 
 
 PAGES: dict[str, Page] = {}
@@ -56,18 +56,45 @@ def page(
 
 
 def styled(style: str, tip: str | None = None, to: str | None = None) -> str:
-    """A segment's style with a hover tip and a link one level down (``to_pipeline``,
-    ``to_run``): ``"ok|tip|pipeline/erp_sql"``. A terminal shows neither."""
+    """A segment's style with a hover tip and a link (``to_pipeline``, ``to_run``):
+    ``"ok|tip|pipeline/erp_sql"``. A terminal shows neither."""
     tip = (tip or "").replace("|", "¦")
     return f"{style}|{tip}|{to}" if to else f"{style}|{tip}" if tip else style
 
 
 def to_pipeline(name: str) -> str:
+    """The Runs page of a pipeline."""
     return f"pipeline/{name}"
 
 
-def to_run(run_id: str) -> str:
-    return f"run/{run_id}"
+def to_run(pipeline: str, run_id: str) -> str:
+    """The Runs page of a pipeline, with this run open."""
+    return f"run/{pipeline}/{run_id}"
+
+
+def header(title: str, context: Context, what: str) -> Block:
+    """The banner, and the filters in force under it: range, pipelines, and ``what`` the page
+    shows (runs, backfills, or both)."""
+    scope = context.view.scope
+    pipelines = ", ".join(scope.pipelines) if scope.pipelines else "all pipelines"
+    shown = f"{scope.start:%Y-%m-%d %H:%M} → {scope.end:%Y-%m-%d %H:%M}Z · {pipelines} · {what}"
+    return [*banner(title, context.size), fit(span(shown, "muted"), context.size), []]
+
+
+def tabs(names: Sequence[tuple[str, str]], chosen: str, size: int) -> Line:
+    """``PIPELINE ✖ sec_form4 │ █ house_ptr`` with the chosen one bracketed: every choice
+    visible, each a link."""
+    parts: Line = [("PIPELINE  ", "info")]
+    for index, (name, state) in enumerate(names):
+        glyph, style, _ = STATES[state]
+        on = name == chosen
+        if index:
+            parts.append((" │ ", "dim"))
+        parts.append((f"{glyph} ", style))
+        parts.append(
+            (f"[{name}]" if on else name, styled("bright" if on else "muted", to=to_pipeline(name)))
+        )
+    return fit(parts, size)
 
 
 def outcome(name: str | None) -> tuple[str, str]:
@@ -75,9 +102,9 @@ def outcome(name: str | None) -> tuple[str, str]:
     return OUTCOMES[name or "none"]
 
 
-def outcome_cell(name: str | None, tip: str | None = None) -> Line:
+def outcome_word(name: str) -> Line:
     glyph, style = outcome(name)
-    return span(glyph, styled(style, tip))
+    return span(f"{glyph} {'killed' if name == 'lost' else name}", style)
 
 
 OUTCOME_LEGEND = legend(
@@ -87,7 +114,6 @@ OUTCOME_LEGEND = legend(
         (OUTCOMES["failed"][0], "error", "failed"),
         (OUTCOMES["lost"][0], "error", "killed"),
         (OUTCOMES["running"][0], "info", "running"),
-        (OUTCOMES["none"][0], "dim", "none"),
     ]
 )
 
@@ -96,38 +122,8 @@ STATES = {
     "error": ("✖", "error", "FAILING"),
     "warning": ("⚠", "warn", "AT RISK"),
     "ok": ("█", "ok", "HEALTHY"),
-    "idle": ("·", "muted", "IDLE"),
+    "idle": ("·", "muted", "NO RUNS"),
 }
-
-
-def verdict(statuses: list[Status], size: int) -> Block:
-    """The answer to "does anything need me?": a count per state, and a stripe across the
-    width in their proportions."""
-    if not statuses:
-        return [span("NO SIGNAL  no pipelines in this range", "muted")]
-    counts = {key: sum(status.level == key for status in statuses) for key in STATES}
-    if counts["error"] + counts["warning"] == 0:
-        head = span(f"✔ ALL CLEAR  {len(statuses)} pipeline(s) healthy", "ok")
-    else:
-        head = join(
-            *(
-                join(
-                    span(f"{STATES[key][0]} {counts[key]} {STATES[key][2]}", STATES[key][1]),
-                    span("    ", None),
-                )
-                for key in STATES
-                if counts[key]
-            )
-        )
-    stripe: Line = []
-    for key in STATES:
-        stripe.extend([("▀", STATES[key][1])] * round(counts[key] / len(statuses) * size))
-    return [fit(head, size), fit(stripe, size)]
-
-
-def compared(note: str) -> str:
-    """A change against the period before, or nothing when there was nothing then."""
-    return "" if note in ("-", "new") else note
 
 
 def level(name: str) -> Line:
@@ -135,31 +131,25 @@ def level(name: str) -> Line:
     return span(text, style)
 
 
-def todo(items: list[Advice], size: int, named: bool = True, label: int = 18) -> Block:
-    """Findings, two lines each: level, pipeline (unless ``named`` is off), and the headline,
-    with its evidence dimmed; then the action under it, linked to the run that shows it."""
-    lines: Block = []
-    indent = label + 3 if named else 2
-    for item in items:
-        glyph, style = LEVELS[item.level][0][0], LEVELS[item.level][1]
-        first = item.pipeline.split(", ")[0]
-        name = (
-            join(
-                fit(span(item.pipeline, styled("bright", to=to_pipeline(first))), label), span(" ")
-            )
-            if named
-            else []
-        )
-        head = join(
-            span(f"{glyph} ", style),
-            name,
-            span(item.finding, styled(style, item.evidence)),
-            span(f"   {item.evidence}", "dim"),
-        )
-        target = to_run(item.run_id) if item.run_id else None
-        action = span(f"→ {item.action}", styled("text", item.also or None, target))
-        lines += [fit(head, size), fit(join(span(" " * indent), action), size)]
-    return lines
+def ago(delta: timedelta | None) -> str:
+    """``2d ago``, ``3h ago``, ``12m ago``, ``now``; ``never`` for none."""
+    if delta is None:
+        return "never"
+    seconds = delta.total_seconds()
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "now"
+
+
+def lasted(delta: timedelta) -> str:
+    """``2d 12h``, ``1h 5m``, ``41m``, ``24s``."""
+    seconds = int(delta.total_seconds())
+    if seconds >= 86400:
+        return f"{seconds // 86400}d {seconds % 86400 // 3600}h"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h {seconds % 3600 // 60}m"
+    return f"{seconds // 60}m" if seconds >= 60 else f"{seconds}s"
 
 
 def empty(title: str, size: int, why: str) -> Block:
@@ -175,3 +165,25 @@ def clear(title: str, size: int, what: str) -> Block:
 def nature_style(nature: str | None) -> str:
     """Busy steps compute (accent); waiting ones wait on something outside (info)."""
     return {"busy": "accent", "waiting": "info", "mixed": "warn"}.get(nature or "", "muted")
+
+
+def two_lines(
+    glyph: Line,
+    label: str,
+    head: Line,
+    under: Line,
+    size: int,
+    width: int = 22,
+    pipeline: str | None = None,
+) -> Block:
+    """A finding's shape: glyph, label (linked to ``pipeline``, else to the first pipeline it
+    names), its headline; the next line, under the headline, what to do."""
+    name = pipeline or label.split(", ")[0]
+    first = join(
+        glyph,
+        span(" "),
+        fit(span(label, styled("bright", to=to_pipeline(name))), width),
+        span(" "),
+        head,
+    )
+    return [fit(first, size), fit(join(span(" " * (width + 3)), under), size)]

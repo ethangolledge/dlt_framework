@@ -8,7 +8,6 @@ import argparse
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
 from urllib.parse import urlencode
 
 import streamlit as st
@@ -20,7 +19,6 @@ from dashboard.render.encode import FONTS, html, stylesheet
 from dashboard.theme import COLOURS
 from dlt_framework.core.monitoring import Frames
 
-OUTCOMES = ("succeeded", "retried", "failed", "lost", "running")
 REFRESH_S = 60
 
 _CHROME = f"""
@@ -42,7 +40,7 @@ label, .stMarkdown p, [data-testid="stCaptionContainer"] {{ color: {COLOURS["mut
 def main() -> None:
     args = _arguments()
     st.set_page_config(page_title="dlt//ops", page_icon="▓", layout="wide")
-    choices = _controls(_frames(args.uri, args.demo))
+    choices = _controls(_frames(args.uri))
     st.markdown(
         _CHROME.replace("{SHEET}", stylesheet(scanlines=st.session_state.get("scanlines", True))),
         unsafe_allow_html=True,
@@ -55,24 +53,25 @@ def main() -> None:
 
 
 def _page(args: argparse.Namespace, choices: Choices) -> None:
-    block = draw(_frames(args.uri, args.demo), choices)
+    block = draw(_frames(args.uri), choices)
     st.markdown(html(block, PAGES[choices.page].title, _href(choices)), unsafe_allow_html=True)
 
 
 def _href(choices: Choices) -> Callable[[str], str]:
-    """Links one level down, as this app's own URL with the same range."""
+    """Links to a pipeline's Runs page, or to a run on it, as this app's own URL."""
 
     def href(target: str) -> str:
         kind, _, key = target.partition("/")
-        chosen = {"focus": key} if kind == "pipeline" else {"run": key}
-        return "?" + urlencode({"page": kind, "since": choices.since, **chosen})
+        pipeline, _, run_id = key.partition("/")
+        query = {"page": "runs", "since": choices.since, "focus": pipeline}
+        return "?" + urlencode({**query, **({"run": run_id} if kind == "run" else {})})
 
     return href
 
 
 @st.cache_data(ttl=REFRESH_S, show_spinner="reading monitoring frames…")
-def _frames(uri: str | None, demo: bool) -> Frames:
-    return load(uri, demo)
+def _frames(uri: str | None) -> Frames:
+    return load(uri)
 
 
 def _controls(frames: Frames) -> Choices:
@@ -98,16 +97,10 @@ def _controls(frames: Frames) -> Choices:
             "pipelines", known, default=[p for p in query.get_all("pipeline") if p in known]
         )
         modes = st.multiselect("modes", ["run", "backfill"], default=query.get_all("mode"))
-        outcomes = st.multiselect(
-            "outcomes", OUTCOMES, default=[o for o in query.get_all("outcome") if o in OUTCOMES]
-        )
-        run_id = focus = None
-        if PAGES[page].picks == "run":
-            run_id = _run_picker(
-                frames, Scope.last(since, now, pipelines=tuple(pipelines)), now, query.get("run")
-            )
+        focus = run_id = None
         if PAGES[page].picks == "pipeline" and known:
             focus = str(st.selectbox("pipeline", known, index=_index(known, query.get("focus"))))
+            run_id = query.get("run") if query.get("focus") == focus else None
         size = st.slider("columns", 100, 240, int(query.get("columns", 160)), step=10)
         st.toggle("live (every minute)", value=True, key="live")
         st.toggle("scanlines", value=True, key="scanlines")
@@ -119,36 +112,12 @@ def _controls(frames: Frames) -> Choices:
             "since": since,
             "pipeline": pipelines,
             "mode": modes,
-            "outcome": outcomes,
             "columns": str(size),
             **({"run": run_id} if run_id else {}),
             **({"focus": focus} if focus else {}),
         }
     )
-    return Choices(
-        page, since, tuple(pipelines), tuple(modes), tuple(outcomes), run_id, focus, size
-    )
-
-
-def _run_picker(frames: Frames, scope: Scope, now: datetime, chosen: str | None) -> str | None:
-    """A run to show: failed and lost first, then newest, labelled readably."""
-    runs = (
-        View.build(frames, scope, now)
-        .runs.sort(["rank", "started_at"], descending=[False, True])
-        .head(200)
-    )
-    if runs.is_empty():
-        return None
-    options = runs["run_id"].to_list()
-    labels = {row["run_id"]: _label(row) for row in runs.iter_rows(named=True)}
-    return str(
-        st.selectbox("run", options, index=_index(options, chosen), format_func=labels.__getitem__)
-    )
-
-
-def _label(run: dict[str, Any]) -> str:
-    when = f"{run['started_at']:%m-%d %H:%M}"
-    return f"{when} {run['pipeline_id']} {run['outcome']} {run['run_id'][:8]}"
+    return Choices(page, since, tuple(pipelines), tuple(modes), run_id, focus, size)
 
 
 def _index(options: list[str], chosen: str | None) -> int:
@@ -158,7 +127,6 @@ def _index(options: list[str], chosen: str | None) -> int:
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uri")
-    parser.add_argument("--demo", action="store_true")
     return parser.parse_args(sys.argv[1:])
 
 

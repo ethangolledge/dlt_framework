@@ -36,10 +36,12 @@ def age(delta: timedelta | None) -> str:
 
 
 def mb(value: float | None) -> str:
-    """``4.4G`` or ``512M``; ``-`` when unknown."""
+    """``4.4G``, ``2.25G``, or ``512M``; ``-`` when unknown."""
     if value is None or value != value:  # NaN
         return "-"
-    return f"{value / 1024:.1f}G" if value >= 1024 else f"{value:.0f}M"
+    if value < 1024:
+        return f"{value:.0f}M"
+    return f"{value / 1024:.2f}".rstrip("0").rstrip(".") + "G"  # 2.25G is not rounded to 2.2G
 
 
 def first_line(text: str | None) -> str:

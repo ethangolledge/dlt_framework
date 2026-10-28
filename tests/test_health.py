@@ -156,6 +156,17 @@ def test_a_pipeline_is_late_against_its_own_schedule(shop) -> None:
     assert signals(shop, runs, settings=daily, now=NOW + 3 * HOUR) == []  # a stated schedule
 
 
+def test_runs_by_hand_set_no_schedule_to_be_late_against(shop) -> None:
+    # a session of hand runs: seconds to minutes apart, then nothing for days
+    offsets = [0, 848, 877, 912, 927, 943, 982, 1016]
+    runs = history(*[ok()] * len(offsets)).with_columns(
+        at=pl.Series([NOW + timedelta(seconds=offset) for offset in offsets])
+    )
+    assert signals(shop, runs, now=NOW + timedelta(days=2)) == []
+    stated = HealthSettings(**{**HEALTH, "expect_every_s": 86400})
+    assert signals(shop, runs, settings=stated, now=NOW + timedelta(days=3))[0][0] == "run_stale"
+
+
 def test_a_slow_run_is_slow_for_this_pipeline(shop) -> None:
     runs = history(*[ok()] * 6, ok(duration_s=16.0))
     assert signals(shop, runs) == [

@@ -29,8 +29,8 @@ def runs(frames: Frames, now: datetime) -> pl.DataFrame:
     """One row per run, newest first: identity, when, outcome, duration, rows, memory, errors.
 
     ``outcome`` is ``succeeded``, ``retried`` (succeeded after a step was retried), ``failed``,
-    ``lost``, or ``running``. ``memory_share`` is the peak against the container limit, or the
-    host's memory outside a container.
+    ``lost``, or ``running``. ``available_mb`` is the container limit, or the host's memory
+    outside a container (unknown in older records); ``memory_share`` is the peak against it.
     """
     events = frames.runs.unique(["run_id", "event"], keep="last", maintain_order=True)
     if events.is_empty():
@@ -72,6 +72,7 @@ def runs(frames: Frames, now: datetime) -> pl.DataFrame:
         seen_at=pl.col("at").max(),
         seen_peak_mb=pl.col("rss_mb").max(),
         seen_limit_mb=pl.col("memory_limit_mb").drop_nulls().last(),
+        seen_host_mb=pl.col("system_total_mb").drop_nulls().max(),
     )
     table = (
         identity.join(ended, on="run_id", how="left")
@@ -110,15 +111,17 @@ def runs(frames: Frames, now: datetime) -> pl.DataFrame:
             ),
             peak_rss_mb=pl.coalesce("peak_rss_mb", "seen_peak_mb"),
             memory_limit_mb=pl.coalesce("memory_limit_mb", "seen_limit_mb"),
+            host_memory_mb=pl.coalesce("host_memory_mb", "seen_host_mb"),  # older records
             rank=pl.col("outcome").replace_strict(_RANK, return_dtype=pl.Int8),
         )
         .with_columns(
             ended_at=pl.when(pl.col("outcome").is_in(["lost", "running"]))
             .then(pl.col("started_at") + pl.duration(seconds=pl.col("duration_s").fill_null(0)))
             .otherwise(pl.col("ended_at")),
+            available_mb=pl.coalesce("memory_limit_mb", "host_memory_mb"),
             memory_share=pl.col("peak_rss_mb") / pl.coalesce("memory_limit_mb", "host_memory_mb"),
         )
-        .drop("grace", "ended_as", "seen_at", "seen_peak_mb", "seen_limit_mb")
+        .drop("grace", "ended_as", "seen_at", "seen_peak_mb", "seen_limit_mb", "seen_host_mb")
         .sort("started_at", descending=True)
     )
 
@@ -171,6 +174,7 @@ def _empty_runs() -> pl.DataFrame:
             "memory_limit_mb": pl.Float64,
             "cpu_seconds": pl.Float64,
             "retried": pl.Boolean,
+            "available_mb": pl.Float64,
             "memory_share": pl.Float64,
             "rank": pl.Int8,
         }
@@ -338,7 +342,17 @@ class View:
 
     def only(self, pipeline: str) -> "View":
         """This view narrowed to one pipeline. ``frames`` stay whole, for facts that read them."""
-        runs = self.runs.filter(pl.col("pipeline_id") == pipeline)
+        return self._narrowed(
+            pl.col("pipeline_id") == pipeline, replace(self.scope, pipelines=(pipeline,))
+        )
+
+    def mode(self, mode: str) -> "View":
+        """This view narrowed to incremental runs (``run``) or to backfills (``backfill``):
+        two different processes, never summed together."""
+        return self._narrowed(pl.col("mode") == mode, replace(self.scope, modes=(mode,)))
+
+    def _narrowed(self, keep: pl.Expr, scope: "Scope") -> "View":
+        runs = self.runs.filter(keep)
         ids = runs["run_id"].implode()
 
         def mine(frame: pl.DataFrame) -> pl.DataFrame:
@@ -346,8 +360,8 @@ class View:
 
         return replace(
             self,
-            scope=replace(self.scope, pipelines=(pipeline,)),
-            history=self.history.filter(pl.col("pipeline_id") == pipeline),
+            scope=scope,
+            history=self.history.filter(keep),
             runs=runs,
             steps=mine(self.steps),
             loads=mine(self.loads),

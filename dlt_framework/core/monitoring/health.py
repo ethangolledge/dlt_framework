@@ -21,6 +21,7 @@ COLUMNS = ("pipeline", "resource", "event", "level", "detail")
 _ENDED = ("succeeded", "failed", "lost")
 _RETRY_RUNS = (3, 5)  # retries in 3 of the last 5 runs is a trend, not a blip
 _MIN_HISTORY = 5  # successes needed before "slow" or "unusual rows" can be judged
+_REGULAR = 0.8  # share of gaps within half to double their median for a derived schedule
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,9 @@ def _late(successes: pl.DataFrame, settings: HealthSettings, now: datetime) -> s
         if gaps.len() < _MIN_HISTORY:
             return None  # too few runs to know the schedule: state expect_every_s
         expected = float(gaps.median())  # type: ignore[arg-type]
+        agree = gaps.is_between(expected / 2, expected * 2).mean()
+        if agree is None or float(agree) < _REGULAR:  # type: ignore[arg-type]
+            return None  # runs by hand, or bursts: no schedule to be late against
     last = successes["at"][-1]
     allowed = timedelta(seconds=expected * settings.stale_after_intervals)
     if now - last <= allowed:
@@ -191,9 +195,10 @@ def _reconciled(reconciliations: pl.DataFrame, resource_id: str) -> str | None:
         return None
     latest = own.filter(pl.col("reconcile_id") == own.sort("at")["reconcile_id"][-1])
     problems = []
-    whole = latest.filter(pl.col("window_kind") == "all").row(0, named=True)
-    if whole["distinct_keys"] is not None and whole["distinct_keys"] < whole["destination_rows"]:
-        problems.append(f"{whole['destination_rows'] - whole['distinct_keys']} duplicate keys")
+    for whole in latest.filter(pl.col("window_kind") == "all").iter_rows(named=True):
+        keys, rows = whole["distinct_keys"], whole["destination_rows"]
+        if keys is not None and keys < rows:
+            problems.append(f"{rows - keys} duplicate keys")
     differ = latest.filter(
         pl.col("source_rows").is_not_null() & (pl.col("source_rows") != pl.col("destination_rows"))
     ).sort("window_start", nulls_last=False)

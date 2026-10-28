@@ -96,6 +96,31 @@ def test_health_reports_the_latest_reconciliation(erp, query, sink) -> None:
     ]
 
 
+def test_health_reads_a_reconciliation_with_no_whole_table_count(erp, sink) -> None:
+    window = ReconcileRecord(
+        reconcile_id="r",
+        resource_id="erp.orders",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+        window_kind="value",
+        window_start="10",
+        window_end="30",
+        destination_rows=1,
+        distinct_keys=None,
+        source_rows=2,
+    )
+    frames = Frames(
+        runs=sink.read(RunRecord),
+        resources=declared(erp),
+        reconciliations=ReconcileRecord.frame([window]),
+    )
+    found = [
+        signal.detail
+        for signal in health(erp.name, HEALTH, frames)
+        if signal.event == "reconcile_mismatch"
+    ]
+    assert found == ["1 count(s) differ from the source, first [10, 30): 1 loaded, 2 upstream"]
+
+
 def test_the_cli_records_each_reconciliation(erp, sink, monkeypatch, capsys) -> None:
     monkeypatch.setattr("dlt_framework.core.pipeline.Pipeline.discover", lambda package: None)
     assert main(["reconcile", "erp", "--source"]) == 0

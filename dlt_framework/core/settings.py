@@ -54,11 +54,11 @@ class HealthSettings(BaseConfiguration):
     """What ``pipeline health`` calls wrong, against each pipeline's own history.
 
     ``expect_every_s`` is how often the pipeline should succeed; 0 derives it from the median
-    gap between recent successes. It is late (``run_stale``) after ``stale_after_intervals`` of
-    those, slow after ``slow_after`` times the p95 of recent durations, and its rows unusual at
-    ``rows_spike`` times their median, or none where there usually are some. ``history_runs``
-    is how many recent runs are compared; ``memory_headroom`` the share of memory a run should
-    leave free.
+    gap between recent successes, when those gaps are regular (runs by hand set no schedule).
+    It is late (``run_stale``) after ``stale_after_intervals`` of those, slow after
+    ``slow_after`` times the p95 of recent durations, and its rows unusual at ``rows_spike``
+    times their median, or none where there usually are some. ``history_runs`` is how many
+    recent runs are compared; ``memory_headroom`` the share of memory a run should leave free.
     """
 
     history_runs: int = REQUIRED

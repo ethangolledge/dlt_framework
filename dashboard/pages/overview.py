@@ -1,140 +1,190 @@
-"""Overview: does anything need me, and what do I do first?
+"""Overview: is production OK?
 
-Read top to bottom it tells one story: the verdict, four numbers against the period before,
-every pipeline worst first with why in a few words, and the next things to do.
+Incremental runs only: backfills are ad hoc, so they get one line here and a page of their
+own. The verdict; every pipeline worst first with its last run, last success, recent runs, and
+what is wrong now; the open incidents with what to run; what is at risk; and the backfills.
 """
 
 import polars as pl
 
-from dashboard.model import overview, triage
-from dashboard.model.advisor import Advice
-from dashboard.model.facts import buckets
+from dashboard.model import checks, gaps, incidents, overview, triage
+from dashboard.model.facts import View
+from dashboard.model.incidents import Incident
 from dashboard.model.triage import Status
 from dashboard.pages.base import (
     OUTCOME_LEGEND,
     STATES,
     Context,
+    ago,
     clear,
-    compared,
     empty,
+    header,
+    lasted,
     outcome,
     page,
     styled,
     to_pipeline,
     to_run,
-    verdict,
+    two_lines,
 )
-from dashboard.render.primitives import (
-    banner,
-    card,
-    panel,
-    share,
-    side_by_side,
-    sparkline,
-    time_axis,
-)
+from dashboard.render.primitives import Column, panel, table
 from dashboard.render.text import Block, Line, fit, join, span, vstack
-from dashboard.units import age
+from dashboard.units import seconds
 
-LABEL = 18  # pipeline names
-NEXT = 5  # actions listed
+RECENT = 20  # runs in each pipeline's strip
 
 
 @page("overview", "Overview")
 def draw(context: Context) -> Block:
     view, size = context.view, context.size
-    todo = triage.actions(view, context.signals)
-    states = triage.statuses(view, todo)
+    production = view.mode("run")
+    found = incidents.incidents(production)
+    report = checks.run(production)
+    missing = gaps.holes(view) + [item for h in gaps.histories(view) for item in h.missing]
+    states = triage.statuses(production, found, report, missing, context.signals)
     return vstack(
-        banner("overview", size, overview.scope_label(view.scope)),
+        header("overview", context, "runs (backfills below)"),
         verdict(states, size),
-        [[]],
-        cards(context),
-        pipelines(context, states),
-        upcoming([item for item in todo if item.level != "info"], size),
-        [span("▸ show pipeline NAME  ·  show run ID  ·  show actions", "dim")],
+        pipelines(production, states, size),
+        open_incidents(view, incidents.incidents(view), size),
+        at_risk(states, size),
+        backfills(view, missing, size),
     )
 
 
-def cards(context: Context) -> Block:
-    kpis = overview.kpis(context.view)
-    size = share(context.size, len(kpis))
-    inner = size - 4
-    blocks = []
-    for kpi in kpis:
-        note = compared(kpi.note) if kpi.title != "STALEST" else kpi.note
-        trend = any(value is not None for value in kpi.trend)
-        below = (
-            join(
-                sparkline(kpi.trend, inner - len(note) - 2 * bool(note), "muted"),
-                span(note and "  " + note, "muted"),
-            )
-            if trend
-            else span(note, "muted")
-        )
-        blocks.append(card(kpi.title, kpi.value, size, style=kpi.style, below=below))
-    return side_by_side(blocks, context.size)
+def verdict(states: list[Status], size: int) -> Block:
+    """``✖ 1 FAILING   ⚠ 1 AT RISK   █ 4 HEALTHY``, or all clear."""
+    if not states:
+        return [span("NO SIGNAL  no pipelines in this range", "muted"), []]
+    counts = {key: sum(status.level == key for status in states) for key in STATES}
+    if counts["error"] + counts["warning"] == 0:
+        return [span(f"✔ ALL CLEAR  {len(states)} pipeline(s) healthy", "ok"), []]
+    parts = [
+        join(span(f"{STATES[key][0]} {counts[key]} {STATES[key][2]}", STATES[key][1]), span("    "))
+        for key in STATES
+        if counts[key]
+    ]
+    return [fit(join(*parts), size), []]
 
 
-def pipelines(context: Context, states: list[Status]) -> Block:
-    view, size = context.view, context.size
+def pipelines(view: View, states: list[Status], size: int) -> Block:
     if not states:
         return empty("PIPELINES", size, "no runs in this range")
     inner = size - 4
-    reason = max(24, inner * 2 // 5)
-    count = max(12, inner - 2 - LABEL - 1 - 13 - reason)
-    cells = dict(overview.matrix(view, count))
-    starts = buckets(view.scope, count)
-    latest = dict(view.runs.group_by("pipeline_id").agg(pl.col("started_at").max()).iter_rows())
-    rows: Block = []
+    columns = [
+        Column("", 1),
+        Column("pipeline", 22),
+        Column("last run", 13),
+        Column("took", 7, "right"),
+        Column("last ok", 9),
+        Column("runs ok", 7, "right"),
+        Column("recent runs", RECENT),
+        Column("now", max(20, inner - 89)),
+    ]
+    fresh = dict(overview.freshness(view).select("pipeline_id", "age").iter_rows())
+    rows: list[list[Line | str]] = []
     for status in states:
-        glyph, style, word = STATES[status.level]
-        name = status.pipeline
-        strip: Line = []
-        for start, found in zip(starts, cells.get(name, [None] * count), strict=True):
-            mark, tone = outcome(found)
-            strip.append((mark, styled(tone, f"{start:%m-%d %H:%M} {found}") if found else tone))
-        tip = "; ".join(f"{item.finding}: {item.action}" for item in status.found) or word.lower()
-        when = latest.get(name)
+        glyph, style, _ = STATES[status.level]
+        own = view.runs.filter(pl.col("pipeline_id") == status.pipeline)
+        latest = own.row(0, named=True) if own.height else None
+        ended = own.filter(pl.col("outcome") != "running")
+        good = ended.filter(pl.col("outcome").is_in(incidents.OK)).height
+        tip = "; ".join(f"{concern.headline}: {concern.detail}" for concern in status.concerns)
         rows.append(
-            join(
-                span(f"{glyph} ", style),
-                fit(span(name, styled("bright", tip, to_pipeline(name))), LABEL),
-                span(" "),
-                strip,
-                fit(span(f"{age(view.now - when)} ago" if when else "-", "muted"), 11, "right"),
-                span("  "),
-                fit(
-                    span(status.headline, styled("muted" if style == "ok" else style, tip)), reason
-                ),
-            )
-        )
-    axis = join(span(" " * (2 + LABEL + 1)), time_axis(view.scope.start, view.scope.end, count))
-    return panel("PIPELINES", [*rows, axis, OUTCOME_LEGEND], size)
-
-
-def upcoming(items: list[Advice], size: int) -> Block:
-    """The first thing to do for each pipeline that needs something, worst first."""
-    if not items:
-        return clear("NEXT", size, "nothing needs doing")
-    first: dict[str, Advice] = {}
-    for item in items:
-        first.setdefault(item.pipeline, item)
-    lines: Block = []
-    for number, item in enumerate(list(first.values())[:NEXT], 1):
-        style = STATES[item.level][1]
-        name = item.pipeline.split(", ")[0]
-        tip = f"{item.finding} ({item.evidence})"
-        lines.append(
-            join(
-                span(f"{number} ", style),
-                fit(span(item.pipeline, styled("bright", to=to_pipeline(name))), LABEL),
-                span(" "),
+            [
+                span(glyph, style),
+                span(status.pipeline, styled("bright", tip or None, to_pipeline(status.pipeline))),
+                join(
+                    span(outcome(latest["outcome"])[0], outcome(latest["outcome"])[1]),
+                    span(f" {ago(view.now - latest['started_at'])}", "muted"),
+                )
+                if latest
+                else span("-", "muted"),
+                seconds(latest["duration_s"]) if latest else "-",
                 span(
-                    item.action, styled("text", tip, to_run(item.run_id) if item.run_id else None)
+                    ago(fresh.get(status.pipeline)), "muted" if status.pipeline in fresh else "dim"
                 ),
-            )
+                span(f"{good}/{ended.height}", "muted" if good == ended.height else "warn"),
+                _strip(own),
+                span(status.headline, styled("muted" if style == "ok" else style, tip or None)),
+            ]
         )
-    if len(items) > len(lines):
-        lines.append(span(f"+{len(items) - len(lines)} more on Actions", "dim"))
-    return panel("NEXT", lines, size, accent=STATES[items[0].level][1])
+    return panel("PIPELINES", [*table(columns, rows), OUTCOME_LEGEND], size)
+
+
+def _strip(runs: pl.DataFrame) -> Line:
+    """The latest runs, oldest to newest, one cell each, each linked to its run."""
+    cells: Line = [(" ", None)] * max(0, RECENT - min(RECENT, runs.height))
+    for run in runs.head(RECENT).reverse().iter_rows(named=True):
+        glyph, style = outcome(run["outcome"])
+        tip = f"{run['started_at']:%m-%d %H:%M} {run['outcome']} {seconds(run['duration_s'])}"
+        cells.append((glyph, styled(style, tip, to_run(run["pipeline_id"], run["run_id"]))))
+    return cells
+
+
+def open_incidents(view: View, every: list[Incident], size: int) -> Block:
+    found = [item for item in every if item.open]
+    if not found:
+        resolved = len(every)
+        later = f"; {resolved} resolved in range (see Incidents)" if resolved else ""
+        return clear("INCIDENTS", size, f"no open incidents{later}")
+    lines: Block = []
+    for item in found:
+        latest = item.latest
+        head = join(
+            span(
+                f"for {lasted(item.lasted(view.now))} (since {item.started_at:%m-%d %H:%M}), "
+                f"{len(item.runs)} run(s): ",
+                "error",
+            ),
+            span(item.summary, "text"),
+        )
+        under = join(
+            span(f"latest {latest['started_at']:%m-%d %H:%M}: ", "muted"),
+            span(
+                incidents.detail(latest),
+                styled("muted", to=to_run(item.pipeline, latest["run_id"])),
+            ),
+            span(f"  → fix it, then $ {incidents.rerun(latest)}", "ok"),
+        )
+        mode = "" if item.mode == "run" else f" ({item.mode})"
+        lines += two_lines(
+            span("✖", "error"), item.pipeline + mode, head, under, size - 4, pipeline=item.pipeline
+        )
+    return panel("OPEN INCIDENTS", lines, size, accent="error")
+
+
+def at_risk(states: list[Status], size: int) -> Block:
+    lines: Block = []
+    for status in states:
+        for concern in status.concerns:
+            if concern.level == "warning":
+                lines += two_lines(
+                    span("⚠", "warn"),
+                    status.pipeline,
+                    span(concern.headline, "warn"),
+                    span(concern.detail, "muted"),
+                    size - 4,
+                )
+    return panel("AT RISK", lines, size, accent="warn") if lines else []
+
+
+def backfills(view: View, missing: list[gaps.Missing], size: int) -> Block:
+    """One line: backfill jobs in range, and the rows still missing."""
+    jobs = gaps.jobs(view)
+    declared = gaps.histories(view)
+    fixable = [item for item in missing if item.kind in gaps.FIXABLE]
+    if jobs.is_empty() and not declared and not fixable:
+        text = span("none run in range, and no resource declares one", "muted")
+    else:
+        failed = jobs.filter(pl.col("outcome") == "failed").height
+        text = join(
+            span(f"{jobs.height} job(s) in range", "text"),
+            span(f", {failed} failed" if failed else "", "error"),
+            span(
+                f" · {len(fixable)} range(s) missing" if fixable else " · nothing missing",
+                "warn" if fixable else "ok",
+            ),
+            span(f" in {len(declared)} declared history(ies)", "muted"),
+        )
+    return [fit(join(span("BACKFILLS  ", "info"), text, span("  → Backfills", "dim")), size)]

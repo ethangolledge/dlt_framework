@@ -379,7 +379,7 @@ star schema with readable, deterministic keys:
 | --- | --- | --- |
 | `run_failed` | error | The latest run failed (with how many in a row) |
 | `run_lost` | error | The latest run was killed |
-| `run_stale` | error | No success for `stale_after_intervals` × the expected gap: `expect_every_s`, or, once there are five, the median gap between successes |
+| `run_stale` | error | No success for `stale_after_intervals` × the expected gap: `expect_every_s`, or, once there are five, the median gap between successes when the gaps are regular (runs by hand set no schedule) |
 | `run_slow` | warning | The latest success took over `slow_after` × the p95 of recent ones |
 | `rows_anomaly` | warning | A resource loaded none where it usually loads some (unless its empty policy is `allow`), or over `rows_spike` × its median |
 | `memory_high` | warning | The latest run's peak left under `memory_headroom` of its memory |
@@ -411,30 +411,33 @@ as a colour. It reads the frames and nothing else (no pipeline code, destination
 so it works for any pipeline and source type, wherever the frames can be read.
 
 ```bash
-pipeline-dashboard show [PAGE] [NAME|RUN] [--since 24h] [--pipeline P]   # in the terminal
-pipeline-dashboard serve [--port 8501]                                   # web app (the dashboard extra)
-pipeline-dashboard export FOLDER [--since 7d]                            # static HTML, any web host
-pipeline-dashboard demo FOLDER                                           # a week of demo frames
+pipeline-dashboard show [PAGE] [PIPELINE] [--run RUN] [--since 24h] [--pipeline P] [--mode run]
+pipeline-dashboard serve [--port 8501]                 # web app (the dashboard extra)
+pipeline-dashboard export FOLDER [--since 7d]          # static HTML, linked, for any web host
 ```
 
-Each command reads `MONITORING__URI` (as runs do), or `--uri`, or `--demo` for generated frames.
-
-It tells one story, top down. Each page answers one question and its first line is the answer;
-what is wrong comes first and in colour, what is fine stays quiet; panels carry titles, not
-descriptions; and every pipeline and run named links one level down (in HTML and on the web).
+Each command reads `MONITORING__URI` (as runs do), or `--uri`. The design, and why, is in
+`docs/dashboard-design.md`: each page answers one question with its first line, shows the
+filters in force and what is selected, and every claim shows its evidence.
 
 | Page | Answers |
 | --- | --- |
-| Overview | Does anything need me? The verdict, four numbers against the period before, every pipeline worst first with its reason and runs, and the next thing to do for each |
-| Pipeline | What is wrong with this one, and since when? Its runs (each links to its run), duration and peak memory per run, its to-do list, its latest runs |
-| Run | Why did it fail, and what do I run next? Then its steps (busy or waiting), memory by step, resources, tables, cursors, and the error's chain and traceback |
-| Actions | Everything to do, worst first: FIX (failing, at risk) and TUNE |
-| Failures, Completeness, Speed, Capacity | Across pipelines, for digging in: each opens with its findings, then the evidence |
-| Profile | The functions a `--profile` run spent its time in, per step |
+| Overview | Is production OK? Incremental runs only: every pipeline worst first (last run, last success, recent runs, what is wrong now), open incidents with the command to run, what is at risk, and one line on backfills |
+| Runs | What is this pipeline doing, and what happened in this run? Pipeline tabs; its runs, newest first; the chosen run in full (what broke and the command, steps, memory, what it loaded, the error's chain and traceback) |
+| Backfills | What history is missing, and how do I fill it? Per declared history: a ribbon of what is loaded, and a row per missing range with its dates, why, and the command; holes in incremental cursors; the backfill jobs and where a failed one stopped |
+| Incidents | What broke, is it still broken, and how often? Open and resolved incidents, each with all its causes counted, and causes by day |
+| Tuning | What would make it faster, cheaper, steadier? The checks' findings with evidence, the evidence panels the records support, and the checks that could not run with what they need |
 
-One list feeds the overview, a pipeline's to-do list, and Actions (`model/triage.py`): pipelines
-whose latest runs failed or were killed, health signals only thresholds can judge (late, slow),
-and the advisor (memory, a slower release, gaps and cursor holes, duplicates, workers).
+- **Incidents** (`model/incidents.py`): a streak of failed or killed runs of one pipeline in
+  one mode, from the first to the next success. Open until then, resolved after, so the open
+  list clears itself and the resolved list is the history.
+- **Missing data** (`model/gaps.py`): gaps in a declared history (never loaded, or where a
+  backfill failed), empty windows between full ones, windows off the source in reconciliation,
+  holes in an incremental cursor, each with the backfill that fills it.
+- **Checks** (`model/checks.py`): one class each, registered by being defined. A check states
+  the data it needs and runs only when it is there; thresholds are `Limits`, overridable in
+  `[dashboard.checks]`. A killed run is called a memory kill only when its peak was near a
+  known limit.
 
 - **Layers**: `app` (frontends) → `pages` → `model` (frames to facts, Polars) and `render`
   (primitives to styled text, encoded as HTML or ANSI) → `theme`. `lint-imports` enforces it,
@@ -443,8 +446,8 @@ and the advisor (memory, a slower release, gaps and cursor holes, duplicates, wo
 - **Dirty data is handled in `model/facts.py`**: duplicate records, older record shapes, runs with
   no end (running until they outlive their pipeline's p99 duration, then lost, timed from their
   last sample), empty ranges ("NO SIGNAL"), and UTC throughout.
-- **Health** uses `pipeline health`'s rules and this environment's `[health]` thresholds where
-  it states them; failing pipelines are found from the runs alone either way.
+- **Health** adds what only its `[health]` thresholds can judge (late, slower than usual,
+  unusual rows); incidents, checks, and gaps say the rest, from the frames alone.
 
 ## Scraping
 

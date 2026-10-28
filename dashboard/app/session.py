@@ -4,7 +4,6 @@ health, and hand a page its context. A frontend only gathers the choices and sho
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from dashboard import demo
 from dashboard.model import source
 from dashboard.model.facts import Scope, View
 from dashboard.pages import PAGES
@@ -23,15 +22,14 @@ class Choices:
     since: str = "24h"
     pipelines: tuple[str, ...] = ()
     modes: tuple[str, ...] = ()
-    outcomes: tuple[str, ...] = ()
-    run_id: str | None = None
-    focus: str | None = None  # the pipeline a pipeline page shows
+    run_id: str | None = None  # the run the Runs page opens
+    focus: str | None = None  # the pipeline the Runs page shows
     size: int = 140
 
 
-def load(uri: str | None, use_demo: bool) -> Frames:
-    """The frames to show: the demo's, or those at the monitoring URI."""
-    return demo.frames() if use_demo else source.read(source.monitoring_uri(uri))
+def load(uri: str | None) -> Frames:
+    """The frames at the monitoring URI: ``uri``, or this environment's ``MONITORING__URI``."""
+    return source.read(source.monitoring_uri(uri))
 
 
 def draw(frames: Frames, choices: Choices, now: datetime | None = None) -> Block:
@@ -43,7 +41,6 @@ def draw(frames: Frames, choices: Choices, now: datetime | None = None) -> Block
         now,
         pipelines=choices.pipelines,
         modes=choices.modes,
-        outcomes=choices.outcomes,
     )
     view = View.build(frames, scope, now)
     signals = source.signals(frames, list(choices.pipelines) or view.pipelines)

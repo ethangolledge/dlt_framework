@@ -1,11 +1,12 @@
 """Memory, CPU, and concurrency: how big a container each pipeline needs, which step sets the
 peak, how much CPU sits idle, and what runs at the same time."""
 
+from dataclasses import replace
 from datetime import timedelta
 
 import polars as pl
 
-from dashboard.model.facts import View, bucket_of, buckets
+from dashboard.model.facts import Scope, View, bucket_of, buckets
 
 SIZING_MARGIN = 1.25  # recommended memory: the p99 peak plus a quarter
 SIZING_STEP_MB = 256  # rounded up to this
@@ -67,26 +68,39 @@ def cpu(view: View) -> pl.DataFrame:
     )
 
 
+def fitted(view: View) -> Scope:
+    """The scope narrowed to when its runs ran: an axis spans the runs, not the quiet after."""
+    if view.runs.is_empty():
+        return view.scope
+    first, last = view.runs.select(pl.col("started_at").min(), pl.col("ended_at").max()).row(0)
+    start = max(view.scope.start, first)
+    end = min(view.scope.end, max(last or first, start + timedelta(minutes=1)))
+    return replace(view.scope, start=start, end=end)
+
+
 def concurrency(view: View, count: int) -> pl.DataFrame:
-    """For each of ``count`` buckets of the scope: how many runs were active, and their summed
-    peak memory against the host. Peaks that stack show where schedules collide; quiet buckets
-    show room to run more."""
-    runs = view.runs.with_columns(
-        first=bucket_of("started_at", view.scope, count),
-        last=bucket_of("ended_at", view.scope, count),
+    """For each of ``count`` buckets of the scope: the most runs active at the same moment, and
+    their summed peak memory then, against the host. A run counts only while it actually runs,
+    so a bucket holding many short runs one after another shows one at a time, not all."""
+    runs = view.runs.filter(pl.col("ended_at").is_not_null()).select(
+        "started_at", "ended_at", pl.col("peak_rss_mb").fill_null(0.0)
     )
-    host = runs["host_memory_mb"].drop_nulls().max()
+    host = view.runs["host_memory_mb"].drop_nulls().max()
+    scope = fitted(view)
+    starts = runs.with_columns(bucket=bucket_of("started_at", scope, count))
     rows = []
-    for index, start in enumerate(buckets(view.scope, count)):
-        active = runs.filter((pl.col("first") <= index) & (pl.col("last") >= index))
-        rows.append(
-            {
-                "start": start,
-                "runs": active.height,
-                "memory_mb": active["peak_rss_mb"].sum() or 0.0,
-                "host_mb": host,
-            }
-        )
+    for index, start in enumerate(buckets(scope, count)):
+        most, memory = 0, 0.0
+        for moment in starts.filter(pl.col("bucket") == index)[
+            "started_at"
+        ]:  # peaks begin at a start
+            active = runs.filter((pl.col("started_at") <= moment) & (pl.col("ended_at") > moment))
+            if active.height > most:
+                most, memory = active.height, float(active["peak_rss_mb"].sum())
+        if not most:  # nothing started here: what carried over from before
+            active = runs.filter((pl.col("started_at") <= start) & (pl.col("ended_at") > start))
+            most, memory = active.height, float(active["peak_rss_mb"].sum())
+        rows.append({"start": start, "runs": most, "memory_mb": memory, "host_mb": host})
     return pl.DataFrame(
         rows,
         schema={
