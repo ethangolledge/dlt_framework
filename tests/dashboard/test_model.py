@@ -121,6 +121,17 @@ def test_scope_keeps_runs_active_in_its_range() -> None:
         Scope.last("3x", NOW)
 
 
+def test_a_range_of_days_runs_from_the_start_of_the_first_to_the_end_of_the_last() -> None:
+    from datetime import date
+
+    scope = Scope.days(date(2026, 10, 20), date(2026, 10, 21), NOW)
+    assert (scope.start, scope.end) == (
+        datetime(2026, 10, 20, tzinfo=UTC),
+        datetime(2026, 10, 22, tzinfo=UTC),
+    )
+    assert Scope.days(date(2026, 10, 27), None, NOW).end == NOW  # open: up to now
+
+
 def test_all_of_history_starts_at_the_first_run_not_1970() -> None:
     found = view(frames_of(*started_and("a", NOW - timedelta(days=40), "succeeded")), "all")
     assert found.scope.start == NOW - timedelta(days=40)
@@ -146,7 +157,7 @@ def test_an_incident_counts_every_cause_in_its_streak(hand) -> None:
     assert form4.open and len(form4.runs) == 4
     assert form4.causes == [
         ("ConfigFieldMissingException", 2),
-        ("SignalReceivedException", 1),
+        ("stopped (SIGTERM)", 1),
         ("killed", 1),
     ]
     assert form4.latest["run_id"] == "form4-signal"

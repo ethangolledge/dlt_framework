@@ -32,6 +32,7 @@ from dashboard.render.text import Block, Line, fit, join, span, vstack
 from dashboard.units import seconds
 
 RECENT = 20  # runs in each pipeline's strip
+ROWS = 15  # pipelines listed: all failing or at risk, then healthy ones up to this
 
 
 @page("overview", "Overview")
@@ -83,7 +84,12 @@ def pipelines(view: View, states: list[Status], size: int) -> Block:
     ]
     fresh = dict(overview.freshness(view).select("pipeline_id", "age").iter_rows())
     rows: list[list[Line | str]] = []
-    for status in states:
+    trouble = [status for status in states if status.level in ("error", "warning")]
+    shown = (
+        trouble
+        + [status for status in states if status not in trouble][: max(0, ROWS - len(trouble))]
+    )
+    for status in shown:
         glyph, style, _ = STATES[status.level]
         own = view.runs.filter(pl.col("pipeline_id") == status.pipeline)
         latest = own.row(0, named=True) if own.height else None
@@ -109,7 +115,13 @@ def pipelines(view: View, states: list[Status], size: int) -> Block:
                 span(status.headline, styled("muted" if style == "ok" else style, tip or None)),
             ]
         )
-    return panel("PIPELINES", [*table(columns, rows), OUTCOME_LEGEND], size)
+    hidden = len(states) - len(shown)
+    more = (
+        [span(f"+{hidden} more healthy or idle: not shown (narrow with --pipeline)", "dim")]
+        if hidden
+        else []
+    )
+    return panel("PIPELINES", [*table(columns, rows), *more, OUTCOME_LEGEND], size)
 
 
 def _strip(runs: pl.DataFrame) -> Line:
@@ -145,12 +157,13 @@ def open_incidents(view: View, every: list[Incident], size: int) -> Block:
                 incidents.detail(latest),
                 styled("muted", to=to_run(item.pipeline, latest["run_id"])),
             ),
-            span(f"  → fix it, then $ {incidents.rerun(latest)}", "ok"),
         )
         mode = "" if item.mode == "run" else f" ({item.mode})"
         lines += two_lines(
             span("✖", "error"), item.pipeline + mode, head, under, size - 4, pipeline=item.pipeline
         )
+        command = span(f"→ fix it, then $ {incidents.rerun(latest)}", "ok")
+        lines.append(fit(join(span(" " * 25), command), size - 4))
     return panel("OPEN INCIDENTS", lines, size, accent="error")
 
 

@@ -7,7 +7,8 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from html import escape
 from pathlib import Path
 
 from dashboard.app.session import RANGES, Choices, draw, load
@@ -30,6 +31,8 @@ def _show(args: argparse.Namespace) -> None:
         since=args.since,
         pipelines=tuple(args.pipeline or ()),
         modes=tuple(args.mode or ()),
+        first=args.first,
+        last=args.last,
         run_id=args.run,
         focus=args.subject,
         size=args.width or shutil.get_terminal_size((140, 40)).columns,
@@ -90,8 +93,24 @@ def _export(args: argparse.Namespace) -> None:
     for name, choices in pages:
         chosen = replace(choices, since=args.since, size=args.width)
         body = html(draw(frames, chosen, now), PAGES[chosen.page].title, href)
-        (folder / name).write_text(_site(PAGES[chosen.page].title, chosen.page, body), "utf-8")
+        picker = _picker(view.pipelines, chosen.focus) if chosen.page == "runs" else ""
+        (folder / name).write_text(
+            _site(PAGES[chosen.page].title, chosen.page, picker + body), "utf-8"
+        )
     print(f"{len(pages)} pages written to {folder}/index.html")
+
+
+def _picker(names: list[str], chosen: str | None) -> str:
+    """A dropdown of every pipeline, opening its Runs page: it scales where tabs do not."""
+    options = "".join(
+        f'<option value="runs-{escape(name)}.html"{" selected" if name == chosen else ""}>'
+        f"{escape(name)}</option>"
+        for name in names
+    )
+    return (
+        f'<label class="pick">pipeline ({len(names)}) '
+        f'<select onchange="location.href=this.value">{options}</select></label>'
+    )
 
 
 def _site(title: str, current: str, body: str) -> str:
@@ -110,6 +129,9 @@ body {{ background: {COLOURS["background"]}; color: {COLOURS["text"]}; margin: 0
 nav {{ margin: 0 0 8px 0; font-size: 13px; }}
 nav a {{ color: {COLOURS["muted"]}; text-decoration: none; margin-right: 14px; }}
 nav a.on, nav a:hover {{ color: {COLOURS["ok"]}; text-shadow: 0 0 8px {COLOURS["ok"]}; }}
+label.pick {{ display: block; margin: 0 0 8px 0; font-size: 13px; color: {COLOURS["info"]}; }}
+label.pick select {{ background: {COLOURS["panel"]}; color: {COLOURS["bright"]};
+                    border: 1px solid {COLOURS["dim"]}; font: inherit; padding: 2px 6px; }}
 {stylesheet()}
 </style></head>
 <body><nav>{links}</nav>{body}</body></html>
@@ -131,7 +153,9 @@ def _parser() -> argparse.ArgumentParser:
     show.set_defaults(command=_show)
     show.add_argument("page", choices=list(PAGES), nargs="?", default="overview")
     show.add_argument("subject", nargs="?", help="the pipeline the Runs page shows")
-    show.add_argument("--since", choices=RANGES, default="24h")
+    show.add_argument("--since", choices=RANGES, default="14d", help="back from now")
+    show.add_argument("--from", dest="first", type=date.fromisoformat, help="first day, 2026-10-01")
+    show.add_argument("--to", dest="last", type=date.fromisoformat, help="last day, inclusive")
     show.add_argument("--pipeline", action="append", help="only this pipeline; repeat for several")
     show.add_argument("--mode", action="append", choices=["run", "backfill"])
     show.add_argument("--run", help="the run the Runs page opens")
@@ -148,7 +172,7 @@ def _parser() -> argparse.ArgumentParser:
     exported = commands.add_parser("export", help="every page as static HTML, for any web host")
     exported.set_defaults(command=_export)
     exported.add_argument("folder")
-    exported.add_argument("--since", choices=RANGES, default="7d")
+    exported.add_argument("--since", choices=RANGES, default="14d")
     exported.add_argument("--width", type=int, default=170)
     source(exported)
     return parser

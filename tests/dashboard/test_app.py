@@ -41,7 +41,19 @@ def test_the_terminal_shows_every_page(key, uri, capsys) -> None:
 def test_the_terminal_shows_the_pipeline_and_run_it_is_given(uri, capsys) -> None:
     show(uri, "runs", "insider", "--run", "insider-killed-12")
     out = capsys.readouterr().out
-    assert "[insider]" in out and "KILLED" in out
+    assert "PIPELINE  █ insider" in out and "KILLED" in out
+
+
+def test_the_terminal_shows_a_range_of_days(uri, capsys) -> None:
+    argv = ["show", "--uri", uri, "--from", "2026-10-25", "--to", "2026-10-26", "--no-colour"]
+    assert terminal.main([*argv, "--width", "120"]) == 0
+    assert "2026-10-25 00:00 → 2026-10-27 00:00Z" in capsys.readouterr().out
+
+
+def test_the_default_range_is_fourteen_days() -> None:
+    from dashboard.app.session import Choices
+
+    assert Choices().since == "14d"
 
 
 def test_colour_is_on_when_asked(uri, capsys) -> None:
@@ -55,6 +67,8 @@ def test_export_writes_every_page_and_every_page_a_link_leads_to(uri, tmp_path, 
     written = {path.name for path in site.iterdir()}
     assert {"index.html", *(f"{key}.html" for key in PAGES if key != "overview")} <= written
     assert {"runs-form4.html", "runs-form4-form4-signal.html"} <= written
+    runs = (site / "runs-insider.html").read_text()
+    assert '<option value="runs-insider.html" selected>insider</option>' in runs
     for page in written:
         html = (site / page).read_text()
         linked = {part.split('"', 1)[0] for part in html.split('href="')[1:]}

@@ -411,19 +411,21 @@ as a colour. It reads the frames and nothing else (no pipeline code, destination
 so it works for any pipeline and source type, wherever the frames can be read.
 
 ```bash
-pipeline-dashboard show [PAGE] [PIPELINE] [--run RUN] [--since 24h] [--pipeline P] [--mode run]
+pipeline-dashboard show [PAGE] [PIPELINE] [--run RUN] [--from DAY --to DAY | --since 14d]
+                        [--pipeline P] [--mode run]
 pipeline-dashboard serve [--port 8501]                 # web app (the dashboard extra)
-pipeline-dashboard export FOLDER [--since 7d]          # static HTML, linked, for any web host
+pipeline-dashboard export FOLDER [--since 14d]         # static HTML, linked, for any web host
 ```
 
-Each command reads `MONITORING__URI` (as runs do), or `--uri`. The design, and why, is in
+Each command reads `MONITORING__URI` (as runs do), or `--uri`, and shows the last 14 days
+unless given a range of days (`--from 2026-10-01 --to 2026-10-14`; a date range on the web). The design, and why, is in
 `docs/dashboard-design.md`: each page answers one question with its first line, shows the
 filters in force and what is selected, and every claim shows its evidence.
 
 | Page | Answers |
 | --- | --- |
 | Overview | Is production OK? Incremental runs only: every pipeline worst first (last run, last success, recent runs, what is wrong now), open incidents with the command to run, what is at risk, and one line on backfills |
-| Runs | What is this pipeline doing, and what happened in this run? Pipeline tabs; its runs, newest first; the chosen run in full (what broke and the command, steps, memory, what it loaded, the error's chain and traceback) |
+| Runs | What is this pipeline, what is it doing, and what happened in this run? One pipeline, picked from a dropdown and named at the top; what it is (source, destination, each resource's write mode, cursor, and history); its runs, newest first; the chosen run in full (what broke and the command, the error, steps, memory, each resource's rows and cursor before and after) |
 | Backfills | What history is missing, and how do I fill it? Per declared history: a ribbon of what is loaded, and a row per missing range with its dates, why, and the command; holes in incremental cursors; the backfill jobs and where a failed one stopped |
 | Incidents | What broke, is it still broken, and how often? Open and resolved incidents, each with all its causes counted, and causes by day |
 | Tuning | What would make it faster, cheaper, steadier? The checks' findings with evidence, the evidence panels the records support, and the checks that could not run with what they need |

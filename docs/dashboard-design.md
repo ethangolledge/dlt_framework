@@ -58,7 +58,8 @@ What real data (copy_trades, 31 runs) looks like, and the design has to hold for
 1. **One question per page; the first line answers it.**
 2. **Two lenses, never mixed:** runs (production health) and backfills (history coverage).
 3. **Master and detail on one page.** A list of things, and the chosen one in full beneath it;
-   the choice is always visible and changeable (tabs for pipelines, a marked row for runs).
+   the choice is always visible and changeable: a dropdown for pipelines (it scales to hundreds,
+   where tabs do not), the pipeline named at the top, and a marked row for the run.
 4. **Incidents are the unit of trouble.** An incident is a streak of failed or killed runs of
    one pipeline, from the first failure to the next success. It is open until a success
    follows, then resolved, so the open list clears itself and the resolved list is the history.
@@ -70,8 +71,11 @@ What real data (copy_trades, 31 runs) looks like, and the design has to hold for
    one class; the pages never branch on which check it is.
 7. **Every actionable item carries the action**: the exact command, window, file and line.
 8. **Axes fit the data**: a timeline spans the runs in range, and few runs get a cell each.
-9. **Filters are global and shown**: range, pipeline, mode, on a filter line at the top of
-   every page, the same in a terminal and on the web.
+9. **Filters are global and shown**: the days (the last 14 unless a range is picked), pipeline,
+   and mode, on a filter line at the top of every page, the same in a terminal and on the web.
+10. **Say what each thing is.** A pipeline's page starts with what it is: its source and
+   destination, and how each resource reads (its cursor, or none: all of it each run). A value
+   that was not recorded says so, never a placeholder that reads as data.
 
 ## 4. Pages
 

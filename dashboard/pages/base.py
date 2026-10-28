@@ -9,7 +9,7 @@ Pages follow the same rules (``docs/dashboard-design.md``):
 - a pipeline or run named links to it on the Runs page.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -79,22 +79,6 @@ def header(title: str, context: Context, what: str) -> Block:
     pipelines = ", ".join(scope.pipelines) if scope.pipelines else "all pipelines"
     shown = f"{scope.start:%Y-%m-%d %H:%M} → {scope.end:%Y-%m-%d %H:%M}Z · {pipelines} · {what}"
     return [*banner(title, context.size), fit(span(shown, "muted"), context.size), []]
-
-
-def tabs(names: Sequence[tuple[str, str]], chosen: str, size: int) -> Line:
-    """``PIPELINE ✖ sec_form4 │ █ house_ptr`` with the chosen one bracketed: every choice
-    visible, each a link."""
-    parts: Line = [("PIPELINE  ", "info")]
-    for index, (name, state) in enumerate(names):
-        glyph, style, _ = STATES[state]
-        on = name == chosen
-        if index:
-            parts.append((" │ ", "dim"))
-        parts.append((f"{glyph} ", style))
-        parts.append(
-            (f"[{name}]" if on else name, styled("bright" if on else "muted", to=to_pipeline(name)))
-        )
-    return fit(parts, size)
 
 
 def outcome(name: str | None) -> tuple[str, str]:

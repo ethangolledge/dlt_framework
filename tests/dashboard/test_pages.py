@@ -1,7 +1,7 @@
 """Every page draws within its width from every shape of frames, and says what it must: the
 answer first, the selection visible, and every missing range or failure with what to do."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import scenarios
@@ -62,7 +62,7 @@ def test_the_overview_answers_first_then_says_who_and_what_to_run() -> None:
     rows = [line for line in lines if " ago " in line]
     assert [row.split()[2] for row in rows] == ["form4", "filings", "insider", "members"]
     joined = "\n".join(lines)
-    assert "ConfigFieldMissingException ×2, SignalReceivedException, killed" in joined
+    assert "ConfigFieldMissingException ×2, stopped (SIGTERM), killed" in joined
     assert "→ fix it, then $ pipeline run form4" in joined
     assert "BACKFILLS  none run in range, and no resource declares one" in joined
 
@@ -74,26 +74,50 @@ def test_the_overview_counts_backfills_apart_from_production() -> None:
     assert any(line.startswith("BACKFILLS  2 job(s) in range, 1 failed") for line in lines)
 
 
+def test_the_overview_lists_every_problem_but_only_some_healthy_pipelines() -> None:
+    built = scenarios.Frames_()
+    for index in range(30):
+        built.add(*scenarios.run(f"p{index:02d}", NOW - timedelta(hours=1)))
+    built.add(
+        *scenarios.run("zz", NOW - timedelta(hours=1), "failed", **scenarios.failure("E", "x"))
+    )
+    lines = text(built.frames(), "overview")
+    rows = [line for line in lines if " ago " in line]
+    assert len(rows) == 15 and "zz" in rows[0]
+    assert any("+16 more healthy or idle: not shown" in line for line in lines)
+
+
 def test_health_shows_lateness_only_it_can_judge() -> None:
     late = Signal("filings", None, "run_stale", "error", "no success for 30h")
     lines = text(scenarios.hand_runs(), "overview", signals=[late])
     assert lines[5].startswith("✖ 2 FAILING")
 
 
-def test_the_runs_page_names_every_pipeline_and_brackets_the_one_shown() -> None:
+def test_the_runs_page_names_the_pipeline_shown_and_what_it_is() -> None:
     lines = text(scenarios.hand_runs(), "runs")
-    assert lines[5].startswith("PIPELINE  ✖ [form4] │ █ filings │ █ insider │ █ members")
-    assert lines[7].startswith("✖ FAILING  0 of 4 runs ok in range")
+    assert lines[5].startswith("PIPELINE  ✖ form4   FAILING   · 1 of 4")
+    joined = "\n".join(lines)
+    assert "─ ABOUT " in joined
     chosen = [line for line in lines if "▶" in line]
     assert len(chosen) == 1 and "form4-si" in chosen[0]  # the open incident's latest run
-    joined = "\n".join(lines)
     assert "→ fix the cause, then $ pipeline run form4" in joined
-    assert "not recorded for this run: steps, memory samples, tables" in joined
+    assert "meaning  signal 15: told to stop from outside" in joined
+    assert "no steps, memory samples, loads, tables recorded for this run" in joined
+
+
+def test_the_runs_page_says_how_each_resource_reads_and_where_its_cursor_moved() -> None:
+    lines = text(scenarios.hand_runs(), "runs", focus="insider")
+    joined = "\n".join(lines)
+    assert "submission" in joined and "cursor updated_at (time)" in joined
+    (loaded,) = [
+        line for line in lines if line.lstrip("│ ").startswith("submission") and "1,000,000" in line
+    ]
+    assert "not recorded" in loaded  # these loads stored no start: older monitoring
 
 
 def test_the_runs_page_opens_the_run_asked_for() -> None:
     lines = text(scenarios.hand_runs(), "runs", focus="insider", run_id="insider-killed-12")
-    assert "[insider]" in lines[5]
+    assert lines[5].startswith("PIPELINE  █ insider")
     (chosen,) = [line for line in lines if "▶" in line]
     assert "killed" in chosen
     assert any("KILLED" in line and "no end reported" in line for line in lines)

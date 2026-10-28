@@ -11,7 +11,7 @@ throughput. Dirty data is dealt with once, here:
 """
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import polars as pl
@@ -265,6 +265,20 @@ class Scope:
         amount, unit = int(text[:-1]), text[-1]
         units = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
         return cls(now - timedelta(**{units[unit]: amount}), now, **kept)
+
+    @classmethod
+    def days(
+        cls, first: date | None, last: date | None, now: datetime, **kept: tuple[str, ...]
+    ) -> "Scope":
+        """From the start of ``first`` to the end of ``last`` (UTC), either open: an open start
+        is all of history, an open end is ``now``."""
+        start = EPOCH if first is None else datetime.combine(first, time(), UTC)
+        end = (
+            now
+            if last is None
+            else min(now, datetime.combine(last, time(), UTC) + timedelta(days=1))
+        )
+        return cls(start, end, **kept)
 
     @property
     def length(self) -> timedelta:

@@ -7,12 +7,12 @@ encoded as HTML. Choices live in the URL, so a view can be shared or bookmarked.
 import argparse
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from urllib.parse import urlencode
 
 import streamlit as st
 
-from dashboard.app.session import RANGES, Choices, draw, load
+from dashboard.app.session import Choices, draw, load
 from dashboard.model.facts import Scope, View
 from dashboard.pages import PAGES
 from dashboard.render.encode import FONTS, html, stylesheet
@@ -63,7 +63,11 @@ def _href(choices: Choices) -> Callable[[str], str]:
     def href(target: str) -> str:
         kind, _, key = target.partition("/")
         pipeline, _, run_id = key.partition("/")
-        query = {"page": "runs", "since": choices.since, "focus": pipeline}
+        days = {
+            **({"from": choices.first.isoformat()} if choices.first else {}),
+            **({"to": choices.last.isoformat()} if choices.last else {}),
+        }
+        query = {"page": "runs", "focus": pipeline, **days}
         return "?" + urlencode({**query, **({"run": run_id} if kind == "run" else {})})
 
     return href
@@ -75,7 +79,8 @@ def _frames(uri: str | None) -> Frames:
 
 
 def _controls(frames: Frames) -> Choices:
-    """The sidebar, seeded from and written back to the URL."""
+    """The sidebar, seeded from and written back to the URL: the page, the days shown (14 back
+    from today unless a range is picked), and on the Runs page one pipeline from a dropdown."""
     query = st.query_params
     now = datetime.now(UTC)
     with st.sidebar:
@@ -87,20 +92,32 @@ def _controls(frames: Frames) -> Choices:
             index=_index(keys, query.get("page")),
             format_func=lambda key: PAGES[key].title,
         )
-        since = st.select_slider(
-            "range",
-            RANGES,
-            value=query.get("since", "24h") if query.get("since") in RANGES else "24h",
+        default = (now.date() - timedelta(days=13), now.date())
+        days = st.date_input(
+            "days",
+            value=(_day(query.get("from")) or default[0], _day(query.get("to")) or default[1]),
+            max_value=now.date(),
         )
+        # a range while being picked has one end; a finished one has two
+        picked = (*days, None, None) if isinstance(days, tuple) else (days, None)
+        first, last = picked[0], picked[1]
         known = View.build(frames, Scope.last("all", now), now).pipelines
-        pipelines = st.multiselect(
-            "pipelines", known, default=[p for p in query.get_all("pipeline") if p in known]
-        )
-        modes = st.multiselect("modes", ["run", "backfill"], default=query.get_all("mode"))
         focus = run_id = None
+        pipelines: list[str] = []
         if PAGES[page].picks == "pipeline" and known:
-            focus = str(st.selectbox("pipeline", known, index=_index(known, query.get("focus"))))
+            focus = str(
+                st.selectbox(
+                    f"pipeline ({len(known)})", known, index=_index(known, query.get("focus"))
+                )
+            )
             run_id = query.get("run") if query.get("focus") == focus else None
+        else:
+            pipelines = st.multiselect(
+                "only these pipelines",
+                known,
+                default=[p for p in query.get_all("pipeline") if p in known],
+            )
+        modes = st.multiselect("modes", ["run", "backfill"], default=query.get_all("mode"))
         size = st.slider("columns", 100, 240, int(query.get("columns", 160)), step=10)
         st.toggle("live (every minute)", value=True, key="live")
         st.toggle("scanlines", value=True, key="scanlines")
@@ -109,15 +126,32 @@ def _controls(frames: Frames) -> Choices:
     st.query_params.from_dict(
         {
             "page": page,
-            "since": since,
             "pipeline": pipelines,
             "mode": modes,
             "columns": str(size),
+            **({"from": first.isoformat()} if first else {}),
+            **({"to": last.isoformat()} if last else {}),
             **({"run": run_id} if run_id else {}),
             **({"focus": focus} if focus else {}),
         }
     )
-    return Choices(page, since, tuple(pipelines), tuple(modes), run_id, focus, size)
+    return Choices(
+        page=page,
+        first=first,
+        last=last,
+        pipelines=tuple(pipelines),
+        modes=tuple(modes),
+        run_id=run_id,
+        focus=focus,
+        size=size,
+    )
+
+
+def _day(text: str | None) -> date | None:
+    try:
+        return date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
 
 
 def _index(options: list[str], chosen: str | None) -> int:

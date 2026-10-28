@@ -60,13 +60,33 @@ class Incident:
         )
 
 
+# Signals a run can be stopped by, and what usually sends them.
+SIGNALS = {
+    2: ("SIGINT", "interrupted, as by Ctrl-C"),
+    9: ("SIGKILL", "killed outright, often by the out-of-memory killer"),
+    15: ("SIGTERM", "told to stop from outside: a timeout, a deploy, or `kill`"),
+}
+
+
 def cause(run: dict[str, Any]) -> str:
-    """A broken run's cause in a word or two: its root exception, or ``killed`` (``killed near
-    its memory limit`` only when its peak says so)."""
+    """A broken run's cause in a word or two: its root exception, ``stopped (SIGTERM)`` for a
+    signal, or ``killed`` (``killed near memory limit`` only when its peak says so)."""
     if run["outcome"] == "lost":
         share = run.get("memory_share")
         return "killed near memory limit" if share and share >= NEAR_LIMIT else "killed"
+    if (number := signal(run)) is not None:
+        return f"stopped ({SIGNALS.get(number, (f'signal {number}', ''))[0]})"
     return str(run["error_cause_type"] or run["error_type"] or "error")
+
+
+def signal(run: dict[str, Any]) -> int | None:
+    """The signal that stopped a run, from dlt's ``Received `signal_code=15```."""
+    message = str(run.get("error_message") or "")
+    if "signal_code=" not in message:
+        return None
+    digits = message.split("signal_code=", 1)[1].lstrip("`'\"")
+    number = "".join(char for char in digits[:3] if char.isdigit())
+    return int(number) if number else None
 
 
 def detail(run: dict[str, Any]) -> str:
@@ -75,6 +95,9 @@ def detail(run: dict[str, Any]) -> str:
         seen = run["error_step"] or "an unknown step"
         return f"no end reported; last seen in {seen}"
     where = [part for part in (run["error_step"], run["error_resource"]) if part]
+    if (number := signal(run)) is not None:
+        name, meaning = SIGNALS.get(number, (f"signal {number}", "stopped from outside"))
+        return " · ".join([*where, f"stopped by {name}: {meaning}"])
     return " · ".join([*where, first_line(run["error_message"])])
 
 

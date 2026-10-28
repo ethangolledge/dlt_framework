@@ -1,9 +1,10 @@
-"""Runs: what is this pipeline doing, and what happened in this run?
+"""Runs: what is this pipeline, what is it doing, and what happened in this run?
 
-One pipeline, chosen from tabs naming every pipeline (worst first). Its state; its runs,
+One pipeline, chosen from a dropdown (or ``show runs NAME``) and named in full at the top:
+what it is (source, destination, each resource's write mode and cursor); its state; its runs,
 newest first, the chosen one marked; and that run in full beneath: what broke and the command
-to run, its steps, memory, what it loaded, and the error's chain and traceback. By default the
-run chosen is the latest of an open incident, else the latest run.
+to run, the error, its steps, memory, and what it loaded. By default the run chosen is the
+latest of an open incident, else the latest run.
 """
 
 from datetime import timedelta
@@ -11,8 +12,9 @@ from typing import Any
 
 import polars as pl
 
-from dashboard.model import checks, gaps, incidents, overview, triage
+from dashboard.model import checks, gaps, incidents, overview, pipelines, triage
 from dashboard.model.facts import View
+from dashboard.model.pipelines import About
 from dashboard.pages.base import (
     STATES,
     Context,
@@ -24,7 +26,6 @@ from dashboard.pages.base import (
     outcome_word,
     page,
     styled,
-    tabs,
     to_run,
 )
 from dashboard.render.primitives import (
@@ -37,6 +38,8 @@ from dashboard.render.primitives import (
     resample,
     sparkline,
     table,
+    time_axis,
+    wrap,
 )
 from dashboard.render.text import Block, Line, fit, hstack, join, span, vstack
 from dashboard.theme import level_style
@@ -61,13 +64,66 @@ def draw(context: Context) -> Block:
     status = next((item for item in states if item.pipeline == name), None)
     mine = production.only(name)
     run = run or _default(mine, status)
+    about = pipelines.about(view, name)
     return vstack(
         header("runs", context, "runs"),
-        [tabs(names, name, size), []],
+        chosen(about, status, [item.pipeline for item in states], size),
+        identity(about, size),
         state(mine, status, size),
         listing(mine, run, size),
-        detail(view, run, size) if run else [],
+        detail(view, run, about, size) if run else [],
     )
+
+
+def chosen(about: About, status: triage.Status | None, names: list[str], size: int) -> Block:
+    """The pipeline shown, unmistakably: its name large, its state, and how to pick another."""
+    glyph, style, word = STATES[status.level if status else "idle"]
+    where = f" {names.index(about.pipeline) + 1} of {len(names)}" if about.pipeline in names else ""
+    return [
+        fit(
+            join(
+                span("PIPELINE  ", "info"),
+                span(f"{glyph} ", style),
+                span(about.pipeline, "bright"),
+                span(f"   {word}", style),
+                span(f"   ·{where} · another: the pipeline dropdown, or `show runs NAME`", "dim"),
+            ),
+            size,
+        ),
+        [],
+    ]
+
+
+def identity(about: About, size: int) -> Block:
+    """What the pipeline is: where it reads from and writes to, and how each resource reads."""
+    source = (
+        " ".join(part for part in (about.source_type, about.source) if part)
+        or "source not recorded"
+    )
+    target = " · dataset ".join(part for part in (about.destination, about.dataset) if part)
+    lines: Block = [
+        join(span(source, "text"), span("  →  ", "accent"), span(target or "-", "text"))
+    ]
+    if about.resources:
+        columns = [
+            Column("resource", 26),
+            Column("write", 8),
+            Column("reads", 56),
+            Column("history", 34),
+            Column("if empty", 8),
+        ]
+        rows: list[list[Line | str]] = [
+            [
+                resource["resource"],
+                resource["write_mode"],
+                span(about.cursor(resource["resource"]), "muted"),
+                span(_history(resource), "muted"),
+                resource["empty"],
+            ]
+            for resource in about.resources
+        ]
+        lines += [[], *table(columns, rows)]
+    return panel("ABOUT", lines, size)
 
 
 def _default(view: View, status: triage.Status | None) -> dict[str, Any] | None:
@@ -75,6 +131,14 @@ def _default(view: View, status: triage.Status | None) -> dict[str, Any] | None:
     if status and status.incident:
         return status.incident.latest
     return view.runs.row(0, named=True) if view.runs.height else None
+
+
+def _history(resource: dict[str, Any]) -> str:
+    """The history a resource declares for backfills, or that it declares none."""
+    if not resource["backfill_window"]:
+        return "no backfill declared"
+    end = edge(resource["backfill_end"]) if resource["backfill_end"] else "open"
+    return f"{edge(resource['backfill_start'])} → {end}"
 
 
 def state(view: View, status: triage.Status | None, size: int) -> Block:
@@ -122,7 +186,7 @@ def listing(view: View, chosen: dict[str, Any] | None, size: int) -> Block:
             "-" if run["rows"] is None else human(run["rows"]),
             span(mb(run["peak_rss_mb"]), level_style(run["memory_share"] or 0)),
             run["code_version"] or "-",
-            span(incidents.detail(run) if run["outcome"] in incidents.BROKEN else "", "muted"),
+            span(*_cause(run)),
             span(
                 run["run_id"][:8],
                 styled("info", "open this run", to_run(run["pipeline_id"], run["run_id"])),
@@ -159,26 +223,34 @@ def _trend(runs: pl.DataFrame, size: int) -> Block:
     return [fit(join(parts, span(f"last {recent.height} runs", "dim")), size), []]
 
 
-def detail(view: View, run: dict[str, Any], size: int) -> Block:
-    """One run in full: the verdict, then whatever its records hold."""
+def detail(view: View, run: dict[str, Any], about: About, size: int) -> Block:
+    """One run in full: the verdict and the error, then whatever else its records hold."""
     run_id = str(run["run_id"])
     steps = view.frames.steps.filter(pl.col("run_id") == run_id).sort("started_at")
     samples = view.frames.samples.filter(pl.col("run_id") == run_id).sort("at")
     loads = view.frames.loads.filter(pl.col("run_id") == run_id)
     tables = view.frames.tables.filter(pl.col("run_id") == run_id)
-    missing = [
+    absent = [
         name
-        for name, frame in (("steps", steps), ("memory samples", samples), ("tables", tables))
+        for name, frame in (
+            ("steps", steps),
+            ("memory samples", samples),
+            ("loads", loads),
+            ("tables", tables),
+        )
         if frame.is_empty()
     ]
-    note = [span(f"not recorded for this run: {', '.join(missing)}", "dim")] if missing else []
+    why = "it stopped before them, or its monitoring predates them"
+    note = (
+        wrap(f"no {', '.join(absent)} recorded for this run: {why}", size, "dim") if absent else []
+    )
     return vstack(
         verdict(run, size),
+        error(run, size),
         waterfall(steps, size),
         memory(run, samples, size),
-        loaded(loads, size),
+        loaded(loads, about, size),
         destination(tables, size),
-        error(run, size),
         note,
     )
 
@@ -223,25 +295,36 @@ def verdict(run: dict[str, Any], size: int) -> Block:
 
 
 def error(run: dict[str, Any], size: int) -> Block:
-    """Where in the code, the chain, and the end of the traceback."""
+    """The failure in full, under the verdict: the cause and its message, where it was raised,
+    the chain of exceptions, and the end of the traceback."""
     if run["outcome"] != "failed":
         return []
+    number = incidents.signal(run)
+    meaning = incidents.SIGNALS.get(number, ("", ""))[1] if number is not None else None
     fields = [
         (name, value)
         for name, value in (
-            ("type", f"{run['error_type']} (exit {run['exit_code']})"),
+            ("cause", f"{run['error_cause_type']}: {run['error_message'] or ''}".strip()),
+            ("meaning", meaning and f"signal {number}: {meaning}"),
+            (
+                "step",
+                " · ".join(part for part in (run["error_step"], run["error_resource"]) if part),
+            ),
             ("window", run["error_window"]),
             ("input", run["error_notes"]),
             ("ours", run["error_where"]),
             ("origin", run["error_origin"]),
+            ("raised", f"{run['error_type']}, exit code {run['exit_code']}"),
         )
         if value
     ]
-    lines: Block = [
-        join(span(f"{name:<8}", "muted"), span(str(value), "text")) for name, value in fields
-    ]
+    lines: Block = []
+    for name, value in fields:
+        text = wrap(str(value), size - 4 - 9, "text")
+        lines.append(join(span(f"{name:<9}", "muted"), text[0]))
+        lines += [join(span(" " * 9), line) for line in text[1:4]]
     chain = str(run["error_chain"] or "").splitlines()
-    if chain:
+    if len(chain) > 1:
         lines += [span(""), span("CHAIN", "info"), *(span(f"  {line}", "muted") for line in chain)]
     trace = str(run["error_traceback"] or "").splitlines()[-14:]
     if trace:
@@ -305,6 +388,9 @@ def memory(run: dict[str, Any], samples: pl.DataFrame, size: int) -> Block:
         label=mb,
         limit=(float(limit), "error") if limit else None,
     )
+    axis = join(span(" " * 8), time_axis(samples["at"][0], samples["at"][-1], size - 12))
+    if samples["step"].drop_nulls().is_empty():  # older samples carry no step to band by
+        return panel("MEMORY", [*body, axis], size)
     codes = resample([_BANDS.get(step or "", ("", 0))[1] for step in samples["step"]], size - 12)
     styles = {code: style for style, code in _BANDS.values()}
     bands = join(
@@ -314,30 +400,48 @@ def memory(run: dict[str, Any], samples: pl.DataFrame, size: int) -> Block:
         [("▀", style, step) for step, (style, _) in _BANDS.items()]
         + ([("·", "error", "limit")] if limit else [])
     )
-    return panel("MEMORY", [*body, bands, key], size)
+    return panel("MEMORY", [*body, axis, bands, key], size)
 
 
-def loaded(loads: pl.DataFrame, size: int) -> Block:
-    """Each resource the run loaded: rows, and where its cursor or window started and ended."""
+def loaded(loads: pl.DataFrame, about: About, size: int) -> Block:
+    """Each resource the run loaded: its rows, how it reads, and where its cursor stood before
+    and after (or the window a backfill loaded)."""
     if loads.is_empty():
         return []
     columns = [
-        Column("resource", 26),
-        Column("rows", 9, "right"),
-        Column("from", 25),
-        Column("to", 25),
+        Column("resource", 24),
+        Column("rows", 10, "right"),
+        Column("cursor", 22),
+        Column("cursor before", 20),
+        Column("cursor after", 20),
     ]
-    rows = []
+    rows: list[list[Line | str]] = []
     for load in loads.sort("rows", descending=True).iter_rows(named=True):
-        increment = load["window_kind"] == "increment"
-        low = load["cursor_start_value"] if increment else load["window_start"]
-        high = load["cursor_last_value"] if increment else load["window_end"]
+        name = load["resource_id"].split(".", 1)[1]
+        declared = next((row for row in about.resources if row["resource"] == name), {})
+        reads = declared.get("cursor_path") or "no cursor: all of it"
+        if load["window_kind"] != "increment":
+            low, high = load["window_start"], load["window_end"]
+            before = span(edge(low), "muted")
+            after = span(edge(high), "ok")
+            reads = f"{load['window_kind']} window"
+        elif not declared.get("cursor_path"):
+            before = after = span("-", "dim")
+        else:
+            low, high = load["cursor_start_value"], load["cursor_last_value"]
+            before = (
+                span(edge(low), "muted")
+                if low
+                else span("not recorded", styled("dim", "monitoring before this was recorded"))
+            )
+            after = span(edge(high), "ok") if high else span("-", "dim")
         rows.append(
             [
-                load["resource_id"].split(".", 1)[1],
+                name,
                 span(f"{load['rows']:,}", "text" if load["rows"] else "muted"),
-                span(edge(low) if low else "start", "muted"),
-                span(edge(high) if high else "-", "ok" if high else "muted"),
+                span(reads, "muted"),
+                before,
+                after,
             ]
         )
     return panel("LOADED", table(columns, rows), size)
