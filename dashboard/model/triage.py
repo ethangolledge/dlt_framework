@@ -7,16 +7,20 @@
 
 A pipeline is as bad as the worst of these. Health's other signals (failed, killed, memory,
 reconcile, gaps) are what incidents, checks, and gaps already say, so they are not read here.
+"ok" means only that: nothing above. Lateness is judged only where health has a schedule.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from dashboard.model import gaps
+from dashboard.model import checks, gaps, incidents, pipelines
 from dashboard.model.checks import Report
-from dashboard.model.facts import View
+from dashboard.model.facts import Scope, View
 from dashboard.model.incidents import Incident
+from dlt_framework.core.monitoring import Frames
 from dlt_framework.core.monitoring.health import Signal
 
+DAYS = 14  # how far back states and checks are judged, and the page's default range
 RANK = {"error": 0, "warning": 1, "ok": 2, "idle": 3}
 _HEALTH = {  # event: (level, headline)
     "run_stale": ("error", "late"),
@@ -94,7 +98,7 @@ def _failing(incident: Incident | None) -> list[Concern]:
     return [
         Concern(
             "error",
-            f"failing: {runs} run(s) since {incident.started_at:%m-%d %H:%M}",
+            f"failing: last {runs} run(s) broke, none ok since {incident.started_at:%m-%d %H:%M}",
             incident.summary,
         )
     ]
@@ -114,3 +118,38 @@ def _missing(pipeline: str, missing: list[gaps.Missing]) -> list[Concern]:
         )
         for resource_id, items in by_resource.items()
     ]
+
+
+@dataclass(frozen=True)
+class Judged:
+    """Everything a verdict is built from, computed once for the page and the terminal."""
+
+    everything: View  # all history: incidents and missing ranges outlive any range
+    production: View  # incremental runs of the last DAYS days: states and checks
+    incidents: list[Incident]
+    report: Report
+    missing: list[gaps.Missing]
+    histories: list[gaps.History]
+    statuses: list[Status]
+    last_success: dict[str, datetime | None]
+    lateness: bool  # whether health judged lateness at all (it needs [health] settings)
+
+
+def judge(frames: Frames, now: datetime, signals: list[Signal] | None = None) -> Judged:
+    everything = View.build(frames, Scope.last("all", now), now)
+    production = View.build(frames, Scope.last(f"{DAYS}d", now), now).mode("run")
+    found = incidents.incidents(everything)
+    report = checks.run(production)
+    histories = gaps.histories(everything, cells=120)
+    missing = gaps.holes(everything) + [item for h in histories for item in h.missing]
+    return Judged(
+        everything=everything,
+        production=production,
+        incidents=found,
+        report=report,
+        missing=missing,
+        histories=histories,
+        statuses=statuses(production, found, report, missing, signals),
+        last_success=pipelines.last_success(everything),
+        lateness=signals is not None,
+    )

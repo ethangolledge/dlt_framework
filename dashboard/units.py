@@ -1,22 +1,6 @@
-"""Numbers as a reader wants them: ``12.4M`` rows, ``4m05s``, ``▲12%`` against before."""
+"""Numbers as a reader wants them: ``4m05s``, ``4.4G``, ``3d ago``."""
 
 from datetime import datetime, timedelta
-
-
-def change(now: float, before: float) -> str:
-    """``▲12%`` against the period before; ``new`` when there was nothing then."""
-    if not before:
-        return "new" if now else "-"
-    delta = (now - before) / before
-    return f"{'▲' if delta > 0 else '▼' if delta < 0 else '='}{abs(delta):.0%}"
-
-
-def human(count: float) -> str:
-    """``12.4M``, ``3.1K``, ``42``."""
-    for size, unit in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(count) >= size:
-            return f"{count / size:.1f}{unit}"
-    return f"{count:.0f}"
 
 
 def seconds(value: float | None) -> str:
@@ -31,8 +15,12 @@ def seconds(value: float | None) -> str:
     return f"{value:.1f}s" if value < 10 else f"{whole}s"
 
 
-def age(delta: timedelta | None) -> str:
-    return "never" if delta is None else seconds(delta.total_seconds())
+def ago(delta: timedelta) -> str:
+    """``3d ago``, ``5h ago``, or ``just now``."""
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if delta.total_seconds() >= size:
+            return f"{int(delta.total_seconds() // size)}{unit} ago"
+    return "just now"
 
 
 def mb(value: float | None) -> str:

@@ -1,6 +1,52 @@
 # Dashboard design: from the data we have to what an engineer needs
 
-Status: **built, 2026-10-28, as revised in section 0.** Replaces `dashboard-plan.md`.
+Status: **built, 2026-10-29, as revised in sections 0a and 0.** Replaces `dashboard-plan.md`.
+
+## 0a. Revision: every claim matches the data, every piece written once
+
+Built against the only real records (copy_trades: 31 runs in 2h20m on 2026-10-25, from a framework
+version that recorded no steps, tables, reconciliations, code versions, or memory limits), the
+pages claimed more than the data held. Fixed:
+
+- **"Healthy" became "last run ok".** Lateness is judged only against a stated or regular
+  schedule, so hand-run pipelines are never late; the overview says when it was not judged.
+- **Rows are "processed"**, not "loaded": under `Merge`, the same 833 rows reloaded four times
+  read as 3.3K. The rows-per-day bars, summing unlike pipelines, are gone.
+- **A success that loaded nothing is its own outcome** ("ok, loaded nothing"), everywhere runs
+  are shown: two real runs succeeded with 0 rows, one at a 5 GB peak.
+- **Percentiles need runs behind them**: p99/p95 only from 20 runs, else the max, named so.
+- **Open incidents say what happened**: "last 4 runs broke, none ok since", not "for 3d 23h"
+  when nothing ran for three days.
+- **Charts swapped**: runs as dots on a linear axis with round, human ticks (it was a square
+  root with two labels); the eight cursor charts (a time cursor against load time is y = x) are
+  a lag column and a sparkline from three loads; new **Trend** on a pipeline (duration, rows,
+  peak memory per run, one time axis, small multiples rather than one dual-axis chart); new
+  **Duplicate keys** from reconcile on Backfills (computed before, never shown).
+- **Code**: one `triage.judge` for the page and the terminal; states and outcomes stated once in
+  `theme.py` and shipped to the page; percentiles, memory, and step profiles in one
+  `performance.py`; dead code deleted. The page is `lib.js`, `components.js` (each table,
+  dropdown, filter row, matrix, and plot written once), and `pages.js`; filters sit in the one
+  row at the top, declared per page.
+
+### How it ties together: from records to decisions
+
+| Decision | Where | What it rests on | What you leave with |
+| --- | --- | --- | --- |
+| Is anything broken right now? | Overview verdict, Open incidents | Incidents (streaks of failed or killed runs until a success) | The pipeline, every cause counted, the command to run |
+| Is anything quietly wrong? | Overview "At risk"; Pipeline "Now" | Checks' warnings, health's late/slow/rows signals (when stated), missing ranges | Each concern with its evidence |
+| Did data actually arrive? | "ok, loaded nothing" marks; Pipeline lag column | `rows` per run; cursor value against load time | Which runs succeeded empty, how far a cursor trails the source |
+| Is a pipeline getting slower or heavier? | Pipeline Trend | duration, rows, peak memory of every run | A step change on the time axis; click through to the run |
+| What happened in this run? | Run | the run record, its steps, samples, loads, tables | The error in full, where it stopped, the command to rerun or resume |
+| Is history complete, exactly once? | Backfills | declared histories, loads' windows, cursor holes, reconcile | Each missing range with its backfill command; duplicate keys |
+| What should we change? | Tuning | checks over memory, steps, loads, releases | A finding, its evidence and sample size, and the change to make |
+| What can't we tell yet? | Tuning "Not checked"; overview lateness note | which records are absent | The records to start writing (e.g. a container limit, a schedule) |
+
+The flow is top-down: the overview names what needs attention, every name links to its
+pipeline, every dot or row to its run, and every actionable item carries its command. A claim
+the data cannot support is either not made or labelled as what it is.
+
+Still unproven on real data: the Tuning checks and the Backfills page. They need runs on the
+current framework (steps, tables, limits) and a declared backfill.
 
 ## 0. Revision: pipelines and runs apart, in the browser
 

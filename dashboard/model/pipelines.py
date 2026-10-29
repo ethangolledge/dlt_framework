@@ -2,12 +2,12 @@
 resource's write mode, cursor, and backfill. Runs say what happened; this says what it is."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import polars as pl
 
-from dashboard.model.facts import View
-from dashboard.units import edge
+from dashboard.model.facts import OK, View
 from dlt_framework.core.monitoring import ResourceRecord
 
 
@@ -19,16 +19,6 @@ class About:
     destination: str | None
     dataset: str | None
     resources: list[dict[str, Any]]  # each as its latest run declared it
-
-    def cursor(self, resource: str) -> str:
-        """How a resource reads: ``cursor modification_date (time) from 2025-01-01``, or
-        ``no cursor: all of it, each run``."""
-        found = next((row for row in self.resources if row["resource"] == resource), None)
-        if found is None or not found["cursor_path"]:
-            return "no cursor: all of it, each run"
-        kind = {"TimeCursor": "time", "ValueCursor": "value"}.get(found["cursor_kind"], "")
-        start = f" from {edge(found['cursor_start'])}" if found["cursor_start"] else ""
-        return f"cursor {found['cursor_path']} ({kind}){start}"
 
 
 def about(view: View, pipeline: str) -> About:
@@ -50,4 +40,14 @@ def about(view: View, pipeline: str) -> About:
             ResourceRecord.declared(view.frames.resources, pipeline),
             key=lambda resource: str(resource["resource"]),
         ),
+    )
+
+
+def last_success(view: View) -> dict[str, datetime | None]:
+    """Each pipeline's last successful incremental run (``None``: it never succeeded)."""
+    return dict(
+        view.history.filter(pl.col("mode") == "run")
+        .group_by("pipeline_id")
+        .agg(pl.col("ended_at").filter(pl.col("outcome").is_in(OK)).max())
+        .iter_rows()
     )

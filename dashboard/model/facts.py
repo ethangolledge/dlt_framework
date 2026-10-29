@@ -11,14 +11,15 @@ throughput. Dirty data is dealt with once, here:
 """
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, time, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
 from dlt_framework.core.monitoring import Frames
 
 ENDED = ("succeeded", "failed", "lost")
+OK = ("succeeded", "retried")
+BROKEN = ("failed", "lost")
 BUSY, WAITING = 0.6, 0.2  # CPU share of a step above which it computed, below which it waited
 OPEN_GRACE = timedelta(hours=1)  # how long a run with no history may run before it is lost
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)  # where "all" starts, until the runs say otherwise
@@ -29,8 +30,9 @@ def runs(frames: Frames, now: datetime) -> pl.DataFrame:
     """One row per run, newest first: identity, when, outcome, duration, rows, memory, errors.
 
     ``outcome`` is ``succeeded``, ``retried`` (succeeded after a step was retried), ``failed``,
-    ``lost``, or ``running``. ``available_mb`` is the container limit, or the host's memory
-    outside a container (unknown in older records); ``memory_share`` is the peak against it.
+    ``lost``, or ``running``; ``empty`` marks a success that loaded no rows. ``available_mb`` is
+    the container limit, or the host's memory outside a container (unknown in older records);
+    ``memory_share`` is the peak against it.
     """
     events = frames.runs.unique(["run_id", "event"], keep="last", maintain_order=True)
     if events.is_empty():
@@ -120,6 +122,7 @@ def runs(frames: Frames, now: datetime) -> pl.DataFrame:
             .otherwise(pl.col("ended_at")),
             available_mb=pl.coalesce("memory_limit_mb", "host_memory_mb"),
             memory_share=pl.col("peak_rss_mb") / pl.coalesce("memory_limit_mb", "host_memory_mb"),
+            empty=pl.col("outcome").is_in(OK) & (pl.col("rows") == 0),
         )
         .drop("grace", "ended_as", "seen_at", "seen_peak_mb", "seen_limit_mb", "seen_host_mb")
         .sort("started_at", descending=True)
@@ -177,6 +180,7 @@ def _empty_runs() -> pl.DataFrame:
             "available_mb": pl.Float64,
             "memory_share": pl.Float64,
             "rank": pl.Int8,
+            "empty": pl.Boolean,
         }
     )
 
@@ -248,14 +252,13 @@ def samples(frames: Frames) -> pl.DataFrame:
 
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """What a reader is looking at: a time range and the pipelines, modes, and outcomes kept.
-    An empty tuple keeps everything."""
+    """What a reader is looking at: a time range and the pipelines and modes kept. An empty tuple
+    keeps everything."""
 
     start: datetime
     end: datetime
     pipelines: tuple[str, ...] = ()
     modes: tuple[str, ...] = ()
-    outcomes: tuple[str, ...] = ()
 
     @classmethod
     def last(cls, text: str, now: datetime, **kept: tuple[str, ...]) -> "Scope":
@@ -266,41 +269,18 @@ class Scope:
         units = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
         return cls(now - timedelta(**{units[unit]: amount}), now, **kept)
 
-    @classmethod
-    def days(
-        cls, first: date | None, last: date | None, now: datetime, **kept: tuple[str, ...]
-    ) -> "Scope":
-        """From the start of ``first`` to the end of ``last`` (UTC), either open: an open start
-        is all of history, an open end is ``now``."""
-        start = EPOCH if first is None else datetime.combine(first, time(), UTC)
-        end = (
-            now
-            if last is None
-            else min(now, datetime.combine(last, time(), UTC) + timedelta(days=1))
-        )
-        return cls(start, end, **kept)
-
-    @property
-    def length(self) -> timedelta:
-        return self.end - self.start
-
-    def previous(self) -> "Scope":
-        """The same length of time just before: what a change is measured against."""
-        return Scope(
-            self.start - self.length, self.start, self.pipelines, self.modes, self.outcomes
-        )
-
     def keep(self, runs: pl.DataFrame) -> pl.DataFrame:
-        """Runs active in the range (started before its end, ended after its start) and kept."""
-        kept = runs.filter((pl.col("started_at") < self.end) & (pl.col("ended_at") >= self.start))
-        for column, values in (
-            ("pipeline_id", self.pipelines),
-            ("mode", self.modes),
-            ("outcome", self.outcomes),
-        ):
+        """Runs active in the range (started before its end, ended after its start) and picked."""
+        return self.picked(
+            runs.filter((pl.col("started_at") < self.end) & (pl.col("ended_at") >= self.start))
+        )
+
+    def picked(self, runs: pl.DataFrame) -> pl.DataFrame:
+        """Runs of the pipelines and modes kept, at any time."""
+        for column, values in (("pipeline_id", self.pipelines), ("mode", self.modes)):
             if values:
-                kept = kept.filter(pl.col(column).is_in(list(values)))
-        return kept
+                runs = runs.filter(pl.col(column).is_in(list(values)))
+        return runs
 
 
 @dataclass(frozen=True)
@@ -329,30 +309,21 @@ class View:
                 scope, start=min(history.select(pl.col("started_at").min()).item(), now)
             )
         kept = scope.keep(history)
-        ids = kept["run_id"].implode()
-
-        def mine(frame: pl.DataFrame) -> pl.DataFrame:
-            return frame.filter(pl.col("run_id").is_in(ids))
-
         return cls(
             scope=scope,
             now=now,
             history=history,
             runs=kept,
-            steps=mine(steps(frames)),
-            loads=mine(loads(frames)),
-            tables=mine(tables(frames)),
-            samples=mine(samples(frames)),
+            steps=_of(steps(frames), kept),
+            loads=_of(loads(frames), kept),
+            tables=_of(tables(frames), kept),
+            samples=_of(samples(frames), kept),
             frames=frames,
         )
 
     @property
     def pipelines(self) -> list[str]:
-        """Every pipeline the frames know, sorted: the filter's options."""
-        return sorted(
-            set(self.history["pipeline_id"].drop_nulls())
-            | set(self.frames.pipelines["pipeline_id"])
-        )
+        return pipeline_names(self.frames)
 
     def only(self, pipeline: str) -> "View":
         """This view narrowed to one pipeline. ``frames`` stay whole, for facts that read them."""
@@ -367,22 +338,25 @@ class View:
 
     def _narrowed(self, keep: pl.Expr, scope: "Scope") -> "View":
         runs = self.runs.filter(keep)
-        ids = runs["run_id"].implode()
-
-        def mine(frame: pl.DataFrame) -> pl.DataFrame:
-            return frame.filter(pl.col("run_id").is_in(ids))
-
         return replace(
             self,
             scope=scope,
             history=self.history.filter(keep),
             runs=runs,
-            steps=mine(self.steps),
-            loads=mine(self.loads),
-            tables=mine(self.tables),
-            samples=mine(self.samples),
+            steps=_of(self.steps, runs),
+            loads=_of(self.loads, runs),
+            tables=_of(self.tables, runs),
+            samples=_of(self.samples, runs),
         )
 
-    def run(self, run_id: str) -> dict[str, Any] | None:
-        found = self.history.filter(pl.col("run_id") == run_id)
-        return found.row(0, named=True) if found.height else None
+
+def pipeline_names(frames: Frames) -> list[str]:
+    """Every pipeline the frames know, sorted: the filter's options."""
+    return sorted(
+        set(frames.runs["pipeline_id"].drop_nulls()) | set(frames.pipelines["pipeline_id"])
+    )
+
+
+def _of(frame: pl.DataFrame, runs: pl.DataFrame) -> pl.DataFrame:
+    """The rows of ``frame`` that belong to ``runs``."""
+    return frame.filter(pl.col("run_id").is_in(runs["run_id"].implode()))

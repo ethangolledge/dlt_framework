@@ -19,7 +19,7 @@ import polars as pl
 from dlt.common.configuration import configspec
 from dlt.common.configuration.specs import BaseConfiguration
 
-from dashboard.model import capacity, performance
+from dashboard.model import performance
 from dashboard.model.facts import View
 from dashboard.units import mb, seconds
 from dlt_framework.core.config import resolve
@@ -91,6 +91,11 @@ class Check(ABC):
         super().__init_subclass__(**kwargs)
         CHECKS.append(cls())
 
+    def found(
+        self, level: str, pipeline: str, title: str, evidence: str, action: str, also: str = ""
+    ) -> Finding:
+        return Finding(self.key, level, self.area, pipeline, title, evidence, action, also)
+
     def lacks(self, view: View) -> list[str]:
         """What it needs that the view does not hold, in words."""
         return sorted({NEEDS.get(need, need) for need in self.needs if not _has(view, need)})
@@ -128,7 +133,7 @@ def _has(view: View, need: str) -> bool:
 def _memory(view: View, limits: Limits) -> list[dict[str, Any]]:
     return [
         row
-        for row in capacity.memory(view).iter_rows(named=True)
+        for row in performance.memory(view).iter_rows(named=True)
         if row["share"] is not None and row["runs"] >= limits.min_runs
     ]
 
@@ -148,13 +153,11 @@ class MemoryTight(Check):
         for row in _memory(view, limits):
             if row["share"] >= limits.memory_tight:
                 give = mb(row["recommended_mb"])
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "warning",
-                    self.area,
                     row["pipeline_id"],
                     f"memory at {row['share']:.0%} of {_against(row)}",
-                    f"p99 peak {mb(row['p99_mb'])} of {mb(row['available_mb'])}, "
+                    f"{row['top']} peak {mb(row['top_mb'])} of {mb(row['available_mb'])}, "
                     f"{row['runs']} runs",
                     f"give it {give}" if row["limit_mb"] else f"run it with at least {give}",
                     "or chunk its largest resource",
@@ -168,13 +171,12 @@ class MemoryIdle(Check):
     def find(self, view: View, limits: Limits) -> Iterable[Finding]:
         for row in _memory(view, limits):
             if row["limit_mb"] and row["share"] <= limits.memory_idle:
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "info",
-                    self.area,
                     row["pipeline_id"],
                     f"memory {row['share']:.0%} used",
-                    f"p99 peak {mb(row['p99_mb'])} of {mb(row['limit_mb'])}, {row['runs']} runs",
+                    f"{row['top']} peak {mb(row['top_mb'])} of {mb(row['limit_mb'])}, "
+                    f"{row['runs']} runs",
                     f"lower its limit to {mb(row['recommended_mb'])}",
                 )
 
@@ -190,14 +192,12 @@ class KilledForMemory(Check):
         for key, own in killed.group_by("pipeline_id"):
             peaks = ", ".join(mb(value) for value in own["peak_rss_mb"].sort())
             limit = own["available_mb"].max()
-            yield Finding(
-                self.key,
+            yield self.found(
                 "warning",
-                self.area,
                 str(key[0]),
                 f"{own.height} run(s) killed at their memory limit",
                 f"peaks {peaks} of {mb(limit)}",  # type: ignore[arg-type]
-                "give it more memory (see its p99 under Tuning)",
+                "give it more memory (see its peaks under Tuning)",
                 "or chunk the resource it was loading",
             )
 
@@ -215,10 +215,8 @@ class RetriesRising(Check):
                 row["runs"] >= limits.min_runs
                 and row["retried_runs"] / row["runs"] >= limits.retried_runs
             ):
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "warning",
-                    self.area,
                     row["pipeline_id"],
                     f"{row['step']} retried in {row['retried_runs']} of {row['runs']} runs",
                     "see the retried attempts under Tuning",
@@ -242,10 +240,8 @@ class SlowerRelease(Check):
             before, after = rows
             slower = after["p50_s"] / before["p50_s"] - 1
             if slower >= limits.slower:
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "warning",
-                    self.area,
                     str(key[0]),
                     f"{after['code_version']} is {slower:.0%} slower",
                     f"median run {seconds(before['p50_s'])} on {before['code_version']} "
@@ -293,9 +289,7 @@ class Waiting(Check):
                     "or merge it as delete-insert; on Postgres raise [load] workers",
                 )
                 title = "load waits on the destination"
-            yield Finding(
-                self.key, "info", self.area, row["pipeline_id"], title, evidence, action, also
-            )
+            yield self.found("info", row["pipeline_id"], title, evidence, action, also)
 
 
 class NormalizeBusy(Check):
@@ -312,10 +306,8 @@ class NormalizeBusy(Check):
                 and (row["share"] or 0) >= limits.waits
                 and (row["cpu_share"] or 0) >= 0.8 * count
             ):
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "info",
-                    self.area,
                     row["pipeline_id"],
                     "normalize is CPU-bound",
                     f"{row['share']:.0%} of run time, {row['cpu_share']:.1f} cores busy",
@@ -335,10 +327,8 @@ class FinishesLast(Check):
                 and row["last"] / row["loads"] >= limits.holds
                 and (row["share"] or 0) >= 0.6
             ):
-                yield Finding(
-                    self.key,
+                yield self.found(
                     "info",
-                    self.area,
                     row["pipeline_id"],
                     f"{row['resource']} finishes last",
                     f"last to finish in {row['last']} of {row['loads']} loads",

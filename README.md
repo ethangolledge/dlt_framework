@@ -24,7 +24,7 @@ dlt_framework/
     custom/             CustomSource        (any Python generator)
     scrape/             ScrapeSource        (web pages through Scrapling spiders)
   cli.py                one entry point for every pipeline
-dashboard/              the monitoring dashboard: model, render, pages, app (terminal, web)
+dashboard/              the monitoring dashboard: model, web (the page), render, app (terminal)
 ```
 
 Each source type owns its package: its adapter, its quirks, and the pipelines built on it
@@ -47,7 +47,6 @@ REST and custom source types; each destination and every other source type is an
 | `filesystem` | `FilesystemSource`: local folders and S3, CSV/JSONL/Parquet readers | medium |
 | `gcs` / `azure` | `gs://` / `az://` buckets for `FilesystemSource`, includes `filesystem` | medium |
 | `documents` | `Documents` reader for `FilesystemSource`: PDFs to rows, OCR for scans (LiteParse, Anthropic SDK) | small |
-| `dashboard` | `pipeline-dashboard serve`: the web app (Streamlit); `show` and `export` need nothing extra | medium |
 | `scrape` | `ScrapeSource`: Scrapling with its fetchers | large (~700 MB in the image: Scrapling's spiders import its browser automation packages even for plain HTTP) |
 
 ```bash
@@ -425,14 +424,14 @@ runs are different things, and have different pages:
 
 | Page | Answers |
 | --- | --- |
-| Overview | Is ingestion healthy? Every pipeline's state now; a heatmap of pipelines by day, each day its runs' outcomes stacked; runs and rows per day; open incidents with the command to run; what is at risk |
-| Pipelines | Which pipelines are there? A card each: source and destination, resources and cursors, last success, its latest runs; searchable |
-| Pipeline | What is this pipeline? What it reads and writes (each resource's write mode, cursor, history, rows, and destination tables), its runs over time, where each cursor stood after each load |
+| Overview | Is ingestion working? Every pipeline's state now (failing, at risk, last run ok, no recent runs) and whether lateness could be judged; a heatmap of pipelines by day, each day its runs' outcomes stacked; open incidents with the command to run; what is at risk |
+| Pipelines | Which pipelines are there? One row each: state, source and destination, resources and cursors, last success, runs ok in range, its latest runs; searchable |
+| Pipeline | What is this pipeline doing? What it reads and writes (each resource's write mode, cursor, lag behind the source, history, rows processed, and destination tables); its trend: duration, rows, and peak memory per run on one time axis; its runs |
 | Runs | Which runs happened? Every run in range, by pipeline and outcome, on a timeline and in a list |
 | Run | What happened in this run? How it ended and the command to run next; the error (cause, where, chain, traceback); steps and memory on one time axis; what each resource loaded, cursor before and after |
-| Backfills | What history is missing? Per declared history a ribbon of what is loaded, and each missing range with its dates, why, and the command; holes in incremental cursors; backfill jobs |
+| Backfills | What history is missing? Per declared history a ribbon of what is loaded, and each missing range with its dates, why, and the command; holes in incremental cursors; duplicate keys from reconcile; backfill jobs |
 | Incidents | What broke, and is it fixed? Open and resolved incidents with every cause counted, and causes by day |
-| Tuning | What should change? The checks' findings with evidence, memory per pipeline, steps, slow tables, and the checks that could not run with what they need |
+| Tuning | What should change? The checks' findings with evidence, memory per pipeline with a size to give it, steps, slow tables, and the checks that could not run with what they need |
 
 - **Incidents** (`model/incidents.py`): a streak of failed or killed runs of one pipeline in
   one mode, from the first to the next success. Open until then, resolved after, so the open
@@ -444,9 +443,18 @@ runs are different things, and have different pages:
   the data it needs and runs only when it is there; thresholds are `Limits`, overridable in
   `[dashboard.checks]`. A killed run is called a memory kill only when its peak was near a
   known limit.
+- **Honest by construction**: a success that loaded no rows is marked "ok, loaded nothing";
+  rows are "processed" (under `Merge` the same rows reload each run); a p99 or p95 is shown only
+  with 20 runs behind it, the maximum (named so) below that; "last run ok" is not "healthy",
+  and the overview says when lateness was not judged.
 - **Layers**: `app` (the command line) → `web` (the data snapshot, the page) → `model` (frames
-  to facts, Polars) and `render` (terminal text) → `theme`. `lint-imports` enforces it, and that
-  the framework never imports the dashboard.
+  to facts, Polars) and `render` (terminal text) → `theme` (colours, states, and outcomes,
+  shared by the page and the terminal). `lint-imports` enforces it, and that the framework never
+  imports the dashboard. `model/triage.py`'s `judge` builds every verdict once, for both.
+- **The page** is three classic scripts (a page opened from disk may not load modules):
+  `lib.js` (the data, the URL, elements, numbers), `components.js` (table, select, the one filter
+  row, matrix, plot with its marks, sparkline, meter, each written once), and `pages.js` (each
+  page built only from components, and a registry of pages and the filters each takes).
 - **Dirty data is handled in `model/facts.py`**: duplicate records, older record shapes, runs with
   no end (running until they outlive their pipeline's p99 duration, then lost, timed from their
   last sample), and UTC throughout.

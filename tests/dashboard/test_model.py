@@ -7,7 +7,7 @@ import pytest
 import scenarios
 from scenarios import NOW
 
-from dashboard.model import capacity, checks, gaps, incidents, triage
+from dashboard.model import checks, gaps, incidents, performance, triage
 from dashboard.model.checks import Check, Finding, Limits
 from dashboard.model.facts import Scope, View, runs
 from dlt_framework.core.monitoring import Frames, RunRecord, SampleRecord, StepRecord
@@ -93,6 +93,16 @@ def test_a_lost_run_takes_its_duration_peak_and_host_memory_from_its_samples() -
     assert (row["available_mb"], row["memory_share"]) == (1000.0, 0.9)  # the host, from samples
 
 
+def test_a_success_that_loaded_nothing_is_empty_and_a_failure_is_not() -> None:
+    frames = frames_of(
+        *started_and("none", NOW - timedelta(hours=2), "succeeded", rows=0),
+        *started_and("some", NOW - timedelta(hours=1), "succeeded", rows=5),
+        *started_and("broke", NOW - timedelta(minutes=30), "failed", rows=0),
+    )
+    empty = dict(runs(frames, NOW).select("run_id", "empty").iter_rows())
+    assert empty == {"none": True, "some": False, "broke": False}
+
+
 def test_a_success_after_a_retried_step_is_retried() -> None:
     attempt = {
         "run_id": "r",
@@ -119,17 +129,6 @@ def test_scope_keeps_runs_active_in_its_range() -> None:
     assert found.runs["run_id"].to_list() == ["in"] and found.history.height == 2
     with pytest.raises(KeyError):
         Scope.last("3x", NOW)
-
-
-def test_a_range_of_days_runs_from_the_start_of_the_first_to_the_end_of_the_last() -> None:
-    from datetime import date
-
-    scope = Scope.days(date(2026, 10, 20), date(2026, 10, 21), NOW)
-    assert (scope.start, scope.end) == (
-        datetime(2026, 10, 20, tzinfo=UTC),
-        datetime(2026, 10, 22, tzinfo=UTC),
-    )
-    assert Scope.days(date(2026, 10, 27), None, NOW).end == NOW  # open: up to now
 
 
 def test_all_of_history_starts_at_the_first_run_not_1970() -> None:
@@ -168,7 +167,7 @@ def test_an_incident_is_resolved_by_the_next_success_and_kept_as_history(hand) -
     found = {item.pipeline: item for item in incidents.incidents(hand)}
     insider, members = found["insider"], found["members"]
     assert not insider.open and insider.causes[0] == ("killed", 3) and len(insider.runs) == 5
-    assert not members.open and members.lasted(NOW) < timedelta(minutes=2)
+    assert not members.open and members.resolved_at - members.started_at < timedelta(minutes=2)
     assert "filings" not in found
     assert [item.open for item in incidents.incidents(hand)] == [True, False, False]  # open first
 
@@ -292,7 +291,7 @@ def test_a_new_check_is_one_class(hand) -> None:
         checks.CHECKS.pop()
 
 
-def test_capacity_sizes_from_the_p99_peak_and_rounds_up() -> None:
+def test_memory_sizes_from_the_highest_peak_and_rounds_up() -> None:
     records = [
         r
         for index in range(5)
@@ -304,7 +303,8 @@ def test_capacity_sizes_from_the_p99_peak_and_rounds_up() -> None:
             memory_limit_mb=2048.0,
         )
     ]
-    row = capacity.memory(view(frames_of(*records), "24h")).row(0, named=True)
+    row = performance.memory(view(frames_of(*records), "24h")).row(0, named=True)
+    assert row["top"] == "max"  # five runs are too few for a p99
     assert row["recommended_mb"] == 1280.0  # 1004 x 1.25 = 1255, up to the next 256
     assert row["share"] == pytest.approx(1004 / 2048, abs=0.001)
 
@@ -323,7 +323,6 @@ def statuses(found: View, signals=None) -> dict[str, triage.Status]:
 def test_triage_fails_only_what_is_failing_now(hand) -> None:
     found = statuses(hand)
     assert found["form4"].level == "error"
-    assert found["form4"].headline.startswith("failing: 4 run(s) since")
     assert {name for name, status in found.items() if status.level == "ok"} == {
         "filings",
         "insider",
@@ -354,7 +353,7 @@ def test_empty_frames_give_empty_facts_not_errors() -> None:
     empty = view(Frames())
     assert empty.runs.is_empty() and incidents.incidents(empty) == []
     assert gaps.histories(empty) == [] and gaps.holes(empty) == [] and gaps.jobs(empty).is_empty()
-    assert checks.run(empty).findings == [] and capacity.memory(empty).is_empty()
+    assert checks.run(empty).findings == [] and performance.memory(empty).is_empty()
     assert statuses(empty) == {}
 
 

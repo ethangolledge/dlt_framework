@@ -16,18 +16,13 @@ from pathlib import Path
 
 import polars as pl
 
-from dashboard.model import checks, gaps, incidents, overview, source, triage
-from dashboard.model.facts import Scope, View
+from dashboard.model import incidents, source, triage
+from dashboard.model.facts import BROKEN, Scope, View
 from dashboard.render.encode import ansi
 from dashboard.render.text import Block, Line, fit, join, span
+from dashboard.theme import STATES
+from dashboard.units import ago
 from dashboard.web import build, snapshot
-
-STATES = {
-    "error": ("✖", "error", "FAILING"),
-    "warning": ("⚠", "warn", "AT RISK"),
-    "ok": ("█", "ok", "HEALTHY"),
-    "idle": ("·", "muted", "NO RECENT RUNS"),
-}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -37,31 +32,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _build(args: argparse.Namespace) -> None:
     frames = source.read(source.monitoring_uri(args.uri))
-    now = datetime.now(UTC)
-    signals = source.signals(frames, View.build(frames, Scope.last("all", now), now).pipelines)
-    held = build.build(Path(args.folder), frames, now, signals)
+    held = build.build(Path(args.folder), frames, datetime.now(UTC), source.signals(frames))
     print(f"dashboard written to {args.folder}/index.html ({held} runs); open it in a browser")
 
 
 def _status(args: argparse.Namespace) -> int:
     frames = source.read(source.monitoring_uri(args.uri))
     now = datetime.now(UTC)
-    everything = View.build(frames, Scope.last("all", now), now)
-    production = View.build(frames, Scope.last(f"{snapshot.DAYS}d", now), now).mode("run")
-    found = [item for item in incidents.incidents(everything) if item.open]
-    missing = gaps.holes(everything) + [m for h in gaps.histories(everything) for m in h.missing]
-    states = triage.statuses(
-        production,
-        found,
-        checks.run(production),
-        missing,
-        source.signals(frames, everything.pipelines),
-    )
-    fresh = dict(overview.freshness(everything).select("pipeline_id", "age").iter_rows())
+    judged = triage.judge(frames, now, source.signals(frames))
+    states = judged.statuses
     counts = {key: sum(s.level == key for s in states) for key in STATES}
+    late = "" if judged.lateness else " · lateness not judged: no [health] settings"
     lines: Block = [
         span(
-            f"dlt//ops · {now:%Y-%m-%d %H:%M}Z · judged over the last {snapshot.DAYS} days", "muted"
+            f"dlt//ops · {now:%Y-%m-%d %H:%M}Z · judged over the last {triage.DAYS} days{late}",
+            "muted",
         ),
         join(
             *(
@@ -74,12 +59,12 @@ def _status(args: argparse.Namespace) -> int:
     width = max((len(s.pipeline) for s in states), default=8) + 2
     for status in states:
         glyph, style, _ = STATES[status.level]
-        age = fresh.get(status.pipeline)
+        last = judged.last_success.get(status.pipeline)
         line: Line = join(
             span(f"{glyph} ", style),
             fit(span(status.pipeline, "bright"), width),
             span(status.headline, style if status.level != "ok" else "muted"),
-            span(f"   last ok {_ago(age) if age is not None else 'never'}", "dim"),
+            span(f"   last ok {ago(now - last) if last else 'never'}", "dim"),
         )
         if status.incident:
             line = join(line, span(f"   → $ {incidents.rerun(status.incident.latest)}", "ok"))
@@ -99,7 +84,7 @@ def _run(args: argparse.Namespace) -> int:
     run = found.row(0, named=True)
     detail = snapshot.detail(frames, run["run_id"])
     error = detail["error"]
-    broken = run["outcome"] in incidents.BROKEN
+    broken = run["outcome"] in BROKEN
     word = "KILLED" if run["outcome"] == "lost" else str(run["outcome"]).upper()
     style = {"succeeded": "ok", "retried": "warn", "running": "info"}.get(run["outcome"], "error")
     lines: Block = [
@@ -137,14 +122,6 @@ def _run(args: argparse.Namespace) -> int:
         )
     _print(lines, args)
     return 0
-
-
-def _ago(delta: object) -> str:
-    seconds = delta.total_seconds()  # type: ignore[attr-defined]
-    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
-        if seconds >= size:
-            return f"{int(seconds // size)}{unit} ago"
-    return "just now"
 
 
 def _print(lines: Block, args: argparse.Namespace) -> None:

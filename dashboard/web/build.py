@@ -14,12 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from dashboard.theme import COLOURS
+from dashboard.theme import COLOURS, OUTCOMES, STATES
 from dashboard.web import snapshot
 from dlt_framework.core.monitoring import Frames
 from dlt_framework.core.monitoring.health import Signal
 
 STATIC = Path(__file__).with_name("static")
+PAGE = ("index.html", "app.css", "lib.js", "components.js", "pages.js")
 
 
 def build(
@@ -28,9 +29,11 @@ def build(
     """Write the app into ``folder``; returns how many runs it holds in full."""
     now = now or datetime.now(UTC)
     folder.mkdir(parents=True, exist_ok=True)
-    for name in ("index.html", "app.js", "app.css"):
+    for name in PAGE:
         shutil.copyfile(STATIC / name, folder / name)
     (folder / "theme.css").write_text(_theme(), encoding="utf-8")
+    look = {"states": STATES, "outcomes": OUTCOMES}
+    (folder / "theme.js").write_text(f"window.DASH_LOOK = {_json(look)};\n", encoding="utf-8")
     data = snapshot.summary(frames, now, signals)
     (folder / "data.js").write_text(f"window.DASH_DATA = {_json(data)};\n", encoding="utf-8")
     runs = folder / "runs"
@@ -49,7 +52,8 @@ def safe(run_id: str) -> str:
 
 
 def _theme() -> str:
-    """The theme's colours as CSS variables, so the page and the terminal share one palette."""
+    """The theme's colours as CSS variables; with theme.js (its states and outcomes), the page
+    and the terminal share one look."""
     names = "\n".join(f"  --{name}: {value};" for name, value in COLOURS.items())
     return f":root {{\n{names}\n}}\n"
 

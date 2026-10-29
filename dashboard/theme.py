@@ -1,4 +1,5 @@
-"""The look, stated once: colours by meaning, shared by the browser dashboard and the terminal.
+"""The look, stated once: colours, states, and outcomes by meaning, shared by the browser
+dashboard and the terminal.
 
 A state is never shown by colour alone: the dashboard gives each a glyph and a word too, so it
 reads in a plain terminal and to colour-blind eyes.
@@ -19,4 +20,20 @@ COLOURS: Final[dict[str, str]] = {
     "error": "#ff3355",
     "background": "#05070a",
     "panel": "#080c10",
+}
+
+# Each state a pipeline can be in, and each way a run can end: (glyph, colour token, word).
+STATES: Final[dict[str, tuple[str, str, str]]] = {
+    "error": ("✖", "error", "FAILING"),
+    "warning": ("⚠", "warn", "AT RISK"),
+    "ok": ("█", "ok", "LAST RUN OK"),
+    "idle": ("·", "muted", "NO RECENT RUNS"),
+}
+OUTCOMES: Final[dict[str, tuple[str, str, str]]] = {
+    "succeeded": ("█", "ok", "ok"),
+    "empty": ("▁", "muted", "ok, loaded nothing"),
+    "retried": ("▓", "warn", "ok after retries"),
+    "failed": ("✖", "error", "failed"),
+    "lost": ("☠", "accent", "killed"),
+    "running": ("◌", "info", "running"),
 }

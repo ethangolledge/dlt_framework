@@ -7,16 +7,14 @@ clears itself, and the resolved list is the history. Every cause in the streak i
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import polars as pl
 
-from dashboard.model.facts import View
+from dashboard.model.facts import BROKEN, View
 from dashboard.units import first_line
 
-BROKEN = ("failed", "lost")
-OK = ("succeeded", "retried")
 NEAR_LIMIT = 0.9  # a killed run this close to its memory limit was probably killed for memory
 
 
@@ -38,9 +36,6 @@ class Incident:
     @property
     def latest(self) -> dict[str, Any]:
         return self.runs[0]
-
-    def lasted(self, now: datetime) -> timedelta:
-        return (self.resolved_at or now) - self.started_at
 
     @property
     def causes(self) -> list[tuple[str, int]]:
@@ -104,11 +99,7 @@ def detail(run: dict[str, Any]) -> str:
 def incidents(view: View) -> list[Incident]:
     """Every incident active in the view's range, open first, then newest. A run still running
     neither breaks nor resolves a streak."""
-    history = view.history.filter(pl.col("outcome") != "running")
-    if view.scope.pipelines:
-        history = history.filter(pl.col("pipeline_id").is_in(list(view.scope.pipelines)))
-    if view.scope.modes:
-        history = history.filter(pl.col("mode").is_in(list(view.scope.modes)))
+    history = view.scope.picked(view.history.filter(pl.col("outcome") != "running"))
     found = []
     for (pipeline, mode), own in history.sort("started_at").group_by(
         "pipeline_id", "mode", maintain_order=True
@@ -138,16 +129,3 @@ def rerun(run: dict[str, Any]) -> str:
         resource = str(run["error_resource"]).split(", ")[0]
         return f"pipeline backfill {pipeline} --resource {resource} --from {start}"
     return f"pipeline run {pipeline}"
-
-
-def by_day(found: list[Incident], days: int, now: datetime) -> list[tuple[str, list[int]]]:
-    """Broken runs per cause per day for the last ``days`` days: one cause recurring across
-    incidents, or many causes once each."""
-    first = (now - timedelta(days=days - 1)).date()
-    counts: dict[str, list[int]] = {}
-    for incident in found:
-        for run in incident.runs:
-            day = (run["started_at"].date() - first).days
-            if 0 <= day < days:
-                counts.setdefault(cause(run), [0] * days)[day] += 1
-    return sorted(counts.items(), key=lambda item: -sum(item[1]))

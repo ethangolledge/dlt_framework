@@ -121,10 +121,9 @@ def site(tmp_path_factory) -> Path:
 
 def test_the_folder_holds_the_page_its_data_and_each_run(site) -> None:
     assert {path.name for path in site.iterdir()} == {
-        "index.html",
-        "app.js",
-        "app.css",
+        *build.PAGE,
         "theme.css",
+        "theme.js",
         "data.js",
         "runs",
     }
@@ -139,7 +138,7 @@ def test_run_ids_become_safe_file_names() -> None:
 
 
 def test_the_page_loads_nothing_from_elsewhere() -> None:
-    for name in ("index.html", "app.js", "app.css"):
+    for name in build.PAGE:
         text = (STATIC / name).read_text()
         assert (
             "http://" not in text.replace("http://www.w3.org/2000/svg", "")
@@ -148,8 +147,10 @@ def test_the_page_loads_nothing_from_elsewhere() -> None:
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_the_script_parses() -> None:
-    subprocess.run(["node", "--check", str(STATIC / "app.js")], check=True)
+def test_the_scripts_parse() -> None:
+    for name in build.PAGE:
+        if name.endswith(".js"):
+            subprocess.run(["node", "--check", str(STATIC / name)], check=True)
 
 
 # ---- the page, in a headless browser ----------------------------------------------------------
@@ -190,13 +191,13 @@ def page(site: Path, route: str) -> str:
         ("/pipelines", ["6 of 6", "rest → duckdb", "no cursor: all of it each run"]),
         (
             "/pipeline/orders",
-            ["What it reads and writes", "updated_at", "Cursor position", "shop.orders"],
+            ["What it reads and writes", "updated_at", "Trend", "shop.orders"],
         ),
         (
             "/runs?pipeline=form4&from=2026-10-25&to=2026-10-25",
-            ["4 run(s) in range", "stopped by SIGTERM"],
+            ["4 runs in range", "stopped by SIGTERM"],
         ),
-        ("/run/form4-signal", ["FAILED", "signal 15, SIGTERM", "pipeline run form4"]),
+        ("/run/form4-signal", ["FAILED", "SIGTERM", "pipeline run form4"]),
         ("/run/orders-070", ["Timeline", "What it loaded", "Destination tables"]),
         ("/backfills", ["4 range(s) missing", "FAILED", "HOLE", "pipeline backfill shop"]),
         ("/incidents", ["2 open", "Resolved", "Causes by day"]),

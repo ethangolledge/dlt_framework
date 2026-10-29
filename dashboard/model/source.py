@@ -1,5 +1,6 @@
 """Where the frames come from: the monitoring sink the framework writes to, by URI."""
 
+from dashboard.model.facts import pipeline_names
 from dlt_framework.core.config import resolve
 from dlt_framework.core.errors import ConfigurationError
 from dlt_framework.core.monitoring import Frames, Sink
@@ -19,11 +20,11 @@ def read(uri: str) -> Frames:
     return Frames.read(Sink.resolve(uri))
 
 
-def signals(frames: Frames, pipelines: list[str]) -> list[Signal] | None:
+def signals(frames: Frames) -> list[Signal] | None:
     """``pipeline health`` for each pipeline, with its own thresholds; ``None`` when this
     environment states no ``[health]`` thresholds to judge by."""
     found = []
-    for pipeline in pipelines:
+    for pipeline in pipeline_names(frames):
         try:
             settings: HealthSettings = RunSettings.of(pipeline).health
         except ConfigurationError:

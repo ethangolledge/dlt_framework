@@ -38,7 +38,7 @@ def test_status_lists_every_pipeline_worst_first_and_fails_while_one_fails(uri, 
 def test_status_succeeds_when_nothing_fails(tmp_path, capsys) -> None:
     healthy = scenarios.Frames_().add(*scenarios.run("p", scenarios.NOW)).frames()
     assert terminal.main(["status", "--uri", sink(tmp_path / "m", healthy), "--no-colour"]) == 0
-    assert "█ 1 HEALTHY" in capsys.readouterr().out
+    assert "█ 1 LAST RUN OK" in capsys.readouterr().out
 
 
 def test_run_shows_how_one_run_ended_and_what_to_run(uri, capsys) -> None:
