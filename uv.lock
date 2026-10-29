@@ -1,12 +1,12 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.15"
 resolution-markers = [
     "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version >= '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.14' and sys_platform == 'emscripten')",
     "python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
-    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version < '3.12' and platform_python_implementation == 'PyPy') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 
@@ -18,7 +18,7 @@ dependencies = [
     { name = "azure-core" },
     { name = "azure-identity" },
     { name = "azure-storage-blob", extra = ["aio"] },
-    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
     { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f4/29/9937905acfaf3e4826d7782f8efab845bb11eaa2e24749a16eeab32e7fa0/adlfs-2026.8.0.tar.gz", hash = "sha256:b78a01bd892c2a99f461b2b2ef4592c2eb45934e728f318472291ccaa6378e06", size = 55898, upload-time = "2026-08-11T18:43:14.13Z" }
@@ -759,13 +759,13 @@ version = "1.29.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
-    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
     { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
     { name = "gitpython" },
     { name = "giturlparse" },
     { name = "humanize" },
     { name = "jsonpath-ng" },
-    { name = "orjson", marker = "(python_full_version >= '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.14' and sys_platform == 'emscripten') or (platform_python_implementation != 'PyPy' and sys_platform != 'emscripten')" },
+    { name = "orjson", marker = "python_full_version >= '3.14' or (platform_python_implementation != 'PyPy' and sys_platform != 'emscripten')" },
     { name = "packaging" },
     { name = "pathvalidate" },
     { name = "pendulum" },
@@ -800,11 +800,11 @@ duckdb = [
 ]
 filesystem = [
     { name = "botocore" },
-    { name = "s3fs", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "s3fs", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
     { name = "s3fs", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
 ]
 gs = [
-    { name = "gcsfs", version = "2026.8.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "gcsfs", version = "2026.8.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
     { name = "gcsfs", version = "2026.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
 ]
 parquet = [
@@ -815,7 +815,7 @@ postgres = [
 ]
 s3 = [
     { name = "botocore" },
-    { name = "s3fs", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "s3fs", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
     { name = "s3fs", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
 ]
 sql-database = [
@@ -1085,8 +1085,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "(python_full_version >= '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.14' and sys_platform == 'emscripten')",
     "python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
-    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version < '3.12' and platform_python_implementation == 'PyPy') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/00/78/f34251dadb8f3921264a1d9b8946f5e542014ee2614b285261b4e40e6775/fsspec-2026.7.0.tar.gz", hash = "sha256:c803c40f4cf860b49dea58ee3e1c33cb9c790520e233537e1340049f89b82a88", size = 317040, upload-time = "2026-07-28T16:34:51.052Z" }
@@ -1113,19 +1113,19 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "(python_full_version >= '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.14' and sys_platform == 'emscripten')",
     "python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
-    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version < '3.12' and platform_python_implementation == 'PyPy') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 dependencies = [
-    { name = "aiohttp", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "decorator", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "google-auth", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "google-auth-oauthlib", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "google-cloud-storage", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "google-cloud-storage-control", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "requests", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "aiohttp" },
+    { name = "decorator" },
+    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "google-auth" },
+    { name = "google-auth-oauthlib" },
+    { name = "google-cloud-storage" },
+    { name = "google-cloud-storage-control" },
+    { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/dd/c6/9424302a448b9d513c8720fd964ab2ad1262e8db3c7952d74c99f8d947d3/gcsfs-2026.8.2.tar.gz", hash = "sha256:304a5f4ce849a5e1275e427c3ffdbe0951e061cc1aa514b5928dcaf7079419e0", size = 1092682, upload-time = "2026-10-22T06:14:07.248Z" }
 wheels = [
@@ -1140,14 +1140,14 @@ resolution-markers = [
     "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
 ]
 dependencies = [
-    { name = "aiohttp", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "decorator", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "google-auth", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "google-auth-oauthlib", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "google-cloud-storage", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "google-cloud-storage-control", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "requests", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
+    { name = "aiohttp" },
+    { name = "decorator" },
+    { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "google-auth" },
+    { name = "google-auth-oauthlib" },
+    { name = "google-cloud-storage" },
+    { name = "google-cloud-storage-control" },
+    { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ed/78/e3eeed58d314b3906c36896999b5f15bd1e0669fba7a8d6733aee046234c/gcsfs-2026.10.1.tar.gz", hash = "sha256:ebdd435946894c47b17a2e4ac2d5f2832e8cde520e227db65d9b901c01fd7d28", size = 1118233, upload-time = "2026-10-16T02:07:28.851Z" }
 wheels = [
@@ -3065,7 +3065,7 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_python_implementation == 'PyPy') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8b/04/e7c1fe4dc78a6fdbfd6c337b1c3732ff543b8a397683ab38378447baa331/pyee-13.0.1.tar.gz", hash = "sha256:0b931f7c14535667ed4c7e0d531716368715e860b988770fc7eb8578d1f67fc8", size = 31655, upload-time = "2026-02-14T21:12:28.044Z" }
 wheels = [
@@ -3083,7 +3083,7 @@ resolution-markers = [
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten')",
 ]
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1d/f1/fdedc2c75c3e31a330659c85e5793bb18b3397981fbf0844c6dee5b18926/pyee-14.0.0.tar.gz", hash = "sha256:76dd0f4314ecd27f02dc73589dea7fd3853f9b6176d8ef9b122860657e3602de", size = 98760, upload-time = "2026-08-13T04:26:11.021Z" }
 wheels = [
@@ -3383,14 +3383,14 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "(python_full_version >= '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.14' and sys_platform == 'emscripten')",
     "python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
-    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_python_implementation == 'PyPy') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
     "(python_full_version < '3.12' and platform_python_implementation == 'PyPy') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 dependencies = [
-    { name = "aiobotocore", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "aiohttp", marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
-    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and platform_python_implementation != 'PyPy') or platform_python_implementation == 'PyPy' or sys_platform == 'emscripten'" },
+    { name = "aiobotocore" },
+    { name = "aiohttp" },
+    { name = "fsspec", version = "2026.7.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/12/60/69fc080b72a32971b2fb5acbc80802b0e876b606f6e27b1689caac4bb57b/s3fs-2026.7.0.tar.gz", hash = "sha256:76b062d1b2bc7bf4bcd9e7d8f1eb2b5dd9d5cee96ce888664c4ddb5f563146bf", size = 87595, upload-time = "2026-07-28T17:14:10.595Z" }
 wheels = [
@@ -3405,9 +3405,9 @@ resolution-markers = [
     "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'",
 ]
 dependencies = [
-    { name = "aiobotocore", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "aiohttp", marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
-    { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and platform_python_implementation != 'PyPy' and sys_platform != 'emscripten'" },
+    { name = "aiobotocore" },
+    { name = "aiohttp" },
+    { name = "fsspec", version = "2026.9.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f7/fe/ab89ab94cc1293849bc1a60876b589007bdd43f59a06ca309e717bd45dc7/s3fs-2026.9.0.tar.gz", hash = "sha256:ec078ff0122d28fd21d36ea4987794e4f42ecd6e8785eeaa083208771c1464e5", size = 89163, upload-time = "2026-09-18T19:02:54.117Z" }
 wheels = [
@@ -3626,11 +3626,11 @@ wheels = [
 
 [[package]]
 name = "tenacity"
-version = "9.1.4"
+version = "9.2.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/9e/497c1c8ebe5a5b5d1d4a7511aea22c0bb1a97e3170d98abdef0e1b34265a/tenacity-9.2.1.tar.gz", hash = "sha256:a606b5c808d0cded4a359d5b9932d867ff2a6a6b64d37350260fd01bbdf83839", size = 58261, upload-time = "2026-10-07T12:13:01.633Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/26/1ff2b0721ac66a3ec5b1402b333110b352ab0a8724052ac279a7b82d40c4/tenacity-9.2.1-py3-none-any.whl", hash = "sha256:9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e", size = 32310, upload-time = "2026-10-07T12:13:00.102Z" },
 ]
 
 [[package]]
