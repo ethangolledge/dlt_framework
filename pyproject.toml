@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 # Destinations
 # DuckDB 2.0 removed relation.fetchmany(), which dlt (1.29 to 1.31) still uses to read CSV.
-duckdb = ["dlt[duckdb]~=1.29.0", "duckdb>=1.5,<2"]
+duckdb = ["dlt[duckdb]~=1.29.0", "duckdb>=1.5,<3"]
 postgres = ["dlt[postgres]~=1.29.0"]
 # Source types beyond REST and custom
 sql = [
