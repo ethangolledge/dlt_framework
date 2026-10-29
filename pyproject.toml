@@ -42,7 +42,7 @@ pipeline-dashboard = "dashboard.app.terminal:entrypoint"
 [dependency-groups]
 dev = [
     "import-linter>=2.15",
-    "mypy>=1.15,<2",
+    "mypy>=1.15,<3",
     "pillow>=13,<14",
     "pytest>=8,<10",
     "pytest-cov>=6,<8",
